@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "kafkrs-models",
+    "kafkrs-server",
+    "kafkrs-python"
+]

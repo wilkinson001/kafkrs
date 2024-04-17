@@ -1,2 +1,2 @@
-mod message;
 pub mod config;
+mod message;

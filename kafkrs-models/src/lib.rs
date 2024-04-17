@@ -1,2 +1,2 @@
 mod message;
-mod schema;
+pub mod config;

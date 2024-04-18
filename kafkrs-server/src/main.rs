@@ -1,4 +1,5 @@
-mod broker;
+mod config;
+mod server;
 
 use clap::Parser;
 
@@ -13,5 +14,5 @@ async fn main() {
         Some(x) => x,
         None => String::from("./config.toml"),
     };
-    let config = broker::load_config(config_path);
+    let config = config::load_config(config_path);
 }

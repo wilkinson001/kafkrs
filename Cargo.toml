@@ -5,3 +5,6 @@ members = [
     "kafkrs-server",
     "kafkrs-python"
 ]
+
+[workspace.metadata.precommit]
+fmt = "cargo fmt"

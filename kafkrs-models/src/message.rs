@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
 use chrono::serde::ts_nanoseconds;
+use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]

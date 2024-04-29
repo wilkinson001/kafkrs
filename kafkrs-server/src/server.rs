@@ -3,13 +3,14 @@ use std::path::Path;
 
 use bincode::config;
 use bincode::serde::encode_to_vec;
+use serde::ser::Serialize;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc::Receiver;
 
 use kafkrs_models::message::Message;
 
-async fn writer_from_channel<T>(mut rx: Receiver<Message<T>>, file: Box<Path>) {
+async fn writer_from_channel<T: Serialize>(mut rx: Receiver<Message<T>>, file: Box<Path>) {
     let file = get_or_create_file(file).await.unwrap();
     let mut buf_writer = BufWriter::new(file);
     let bin_conf = config::legacy();

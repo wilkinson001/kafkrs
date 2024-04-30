@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Receiver;
 
 use kafkrs_models::message::Message;
 
-async fn writer_from_channel<T: Serialize>(mut rx: Receiver<Message<T>>, file: Box<Path>) {
+pub async fn writer_from_channel<T: Serialize>(mut rx: Receiver<Message<T>>, file: String) {
     let file = get_or_create_file(file).await.unwrap();
     let mut buf_writer = BufWriter::new(file);
     let bin_conf = config::legacy();
@@ -21,9 +21,10 @@ async fn writer_from_channel<T: Serialize>(mut rx: Receiver<Message<T>>, file: B
     let _ = buf_writer.flush();
 }
 
-async fn get_or_create_file(file_path: Box<Path>) -> Result<File> {
-    if !file_path.exists() {
+async fn get_or_create_file(file_path: String) -> Result<File> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
         panic!("File at {:?} does not exist", file_path)
     }
-    return File::open(file_path).await;
+    return File::open(path).await;
 }

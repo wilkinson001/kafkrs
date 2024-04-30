@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.37.0", features = ["fs", "rt", "rt-multi-thread", "macros", "sync", "io-util"] }
+tokio = { version = "1.37.0", features = ["fs", "rt", "rt-multi-thread", "macros", "sync", "io-util", "net"] }
 toml = "0.8.12"
 kafkrs-models = { path = "../kafkrs-models" }
 clap = { version = "4.5.4", features = ["derive"] }

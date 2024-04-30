@@ -24,8 +24,8 @@ async fn main() {
         .unwrap_or_else(|| String::from("./config.toml"));
     let config = config::load_config(config_path);
     let sock_addr: String = construct_socket_address(config.address, config.port);
-    let listener = TcpListener::bind(sock_addr).await.unwrap();
-    println!("Started TCPListener at: {:?}", sock_addr);
+    let listener = TcpListener::bind(&sock_addr).await.unwrap();
+    println!("Started TCPListener at: {:?}", &sock_addr);
     let (tx, rx): (Sender<Message<String>>, Receiver<Message<String>>) = channel(20);
     tokio::spawn(writer_from_channel(rx, config.logfile));
     loop {

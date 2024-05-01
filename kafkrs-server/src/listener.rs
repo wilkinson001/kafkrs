@@ -13,5 +13,9 @@ pub async fn process<T: DeserializeOwned>(mut socket: TcpStream, tx: Sender<Mess
     let _ = socket.read_to_end(&mut buffer).await;
     let bin_conf = config::legacy();
     let message: Message<T> = decode_from_slice(&buffer, bin_conf).unwrap().0;
+    println!(
+        "{:?} - Received Message with key: {:?}",
+        message.timestamp, message.key
+    );
     permit.send(message);
 }

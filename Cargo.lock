@@ -303,6 +303,9 @@ dependencies = [
 name = "kafkrs-python"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "chrono",
+ "kafkrs-models",
  "pyo3",
 ]
 

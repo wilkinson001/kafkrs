@@ -5,7 +5,6 @@ use pyo3::types::PyBytes;
 
 use kafkrs_models::message::Message;
 
-/// Encodes a key/value to a binary representation of a Message
 #[pyfunction]
 fn encode_message(py: Python, key: String, value: String) -> PyResult<&PyBytes> {
     let message: Message<String> = Message {
@@ -19,7 +18,6 @@ fn encode_message(py: Python, key: String, value: String) -> PyResult<&PyBytes> 
     Ok(py_mess)
 }
 
-/// A Python module implemented in Rust.
 #[pymodule]
 fn kafkrs_python(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_message, m)?)?;

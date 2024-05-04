@@ -3,7 +3,7 @@ use std::path::Path;
 use bincode::config;
 use bincode::serde::encode_to_vec;
 use serde::Serialize;
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Receiver;
@@ -33,7 +33,12 @@ impl<'a, T: Serialize> Writer<'a, T> {
         if !path.exists() {
             panic!("File at {:?} does not exist", self.file_path)
         }
-        File::open(path).await.unwrap()
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .unwrap()
     }
     async fn process_message(&mut self, buf_writer: &mut BufWriter<File>, message: Message<T>) {
         let bin_conf = config::legacy();
@@ -50,7 +55,7 @@ impl<'a, T: Serialize> Writer<'a, T> {
                 Some(message) = self.read_channel.recv() => self.process_message(&mut buf_writer, message).await,
                 _ = self.shutdown_channel.recv() => {
                     println!("Shutting down Writer");
-                    _ = buf_writer.shutdown().await;
+                    _ = buf_writer.flush().await.unwrap();
                     println!("Flushed");
                     break
                 }

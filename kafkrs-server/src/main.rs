@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::{error, info};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -37,16 +38,19 @@ async fn main() {
         writer.process().await
     });
     set.spawn(async move {
-        let sock_addr: String = construct_socket_address(config.address, config.port);
-        let tcp_listener = TcpListener::bind(&sock_addr).await.unwrap();
-        println!("Started TCPListener at: {:?}", &sock_addr);
-        loop {
-            let (socket, _) = tcp_listener.accept().await.unwrap();
-            let thread_tx = tx.clone();
-            tokio::spawn(async move {
-                let mut listener = Listener::new(thread_tx, socket);
-                listener.process().await
-            });
+        for port in config.ports {
+            let mov_address = config.address.to_owned();
+            let sock_addr: String = construct_socket_address(mov_address, port);
+            let listener = TcpListener::bind(&sock_addr).await.unwrap();
+            info!("Started TCPListener at: {:?}", &sock_addr);
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let thread_tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut listener = Listener::new(thread_tx, socket);
+                    listener.process().await
+                });
+            }
         }
     });
     match signal::ctrl_c().await {
@@ -54,10 +58,10 @@ async fn main() {
             println!("Shutdown signal received");
             _ = shutdown_tx.send(true);
             if let Some(_) = set.join_next().await {
-                println!("Shutdown complete. Goodbye")
+                info!("Shutdown complete. Goodbye")
             }
         }
-        Err(err) => eprintln!("Unable to listen for shutdown signal: {}", err),
+        Err(err) => error!("Unable to listen for shutdown signal: {}", err),
     }
 }
 

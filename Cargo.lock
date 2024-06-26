@@ -316,6 +316,7 @@ dependencies = [
  "bincode",
  "clap",
  "kafkrs-models",
+ "log",
  "pre-commit-hooks",
  "serde",
  "tokio",

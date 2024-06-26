@@ -42,6 +42,7 @@ impl<'a, T: Serialize> Writer<'a, T> {
     }
     async fn process_message(&mut self, buf_writer: &mut BufWriter<File>, message: Message<T>) {
         let bin_conf = config::legacy();
+        // TODO: Alter to write compact binary representation of message
         println!("Writing Message: {:?}", message.key);
         let de_mes = encode_to_vec(&message, bin_conf).unwrap();
         let _ = buf_writer.write(&de_mes).await;

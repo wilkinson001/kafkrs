@@ -43,21 +43,19 @@ async fn main() {
             let sock_addr: String = construct_socket_address(mov_address, port);
             let listener = TcpListener::bind(&sock_addr).await.unwrap();
             info!("Started TCPListener at: {:?}", &sock_addr);
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let thread_tx = tx.clone();
-                tokio::spawn(async move {
-                    let mut listener = Listener::new(thread_tx, socket);
-                    listener.process().await
-                });
-            }
+            let (socket, _) = listener.accept().await.unwrap();
+            let thread_tx = tx.clone();
+            tokio::spawn(async move {
+                let mut listener = Listener::new(thread_tx, socket);
+                listener.process().await
+            });
         }
     });
     match signal::ctrl_c().await {
         Ok(()) => {
             println!("Shutdown signal received");
             _ = shutdown_tx.send(true);
-            if let Some(_) = set.join_next().await {
+            if set.join_next().await.is_some() {
                 info!("Shutdown complete. Goodbye")
             }
         }
@@ -67,6 +65,6 @@ async fn main() {
 
 fn construct_socket_address(address: String, port: u16) -> String {
     let mut result = address.clone();
-    result.push_str(&*":");
+    result.push(':');
     result + &port.to_string()
 }

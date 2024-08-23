@@ -15,5 +15,5 @@ pub(crate) fn load_config(file_path: String) -> Config {
         Ok(conf) => conf,
         Err(error) => panic!("Config file is not valid: {:?}", error.message()),
     };
-    return config;
+    config
 }

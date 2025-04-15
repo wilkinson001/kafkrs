@@ -7,6 +7,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 pub struct Message<T> {
     pub key: String,
     pub value: T,
+    pub schema: Option<String>,
     #[serde(with = "ts_nanoseconds")]
     pub timestamp: DateTime<Utc>,
 }

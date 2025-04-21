@@ -2,7 +2,6 @@ use std::path::Path;
 
 use bincode::config;
 use bincode::serde::encode_to_vec;
-use serde::Serialize;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::broadcast;
@@ -10,18 +9,18 @@ use tokio::sync::mpsc::Receiver;
 
 use kafkrs_models::message::Message;
 
-pub struct Writer<'a, T> {
+pub struct Writer<'a> {
     file_path: String,
-    read_channel: Receiver<Message<T>>,
+    read_channel: Receiver<Message>,
     shutdown_channel: &'a mut broadcast::Receiver<bool>,
 }
 
-impl<'a, T: Serialize> Writer<'a, T> {
+impl<'a> Writer<'a> {
     pub fn new(
         file_path: String,
-        read_channel: Receiver<Message<T>>,
-        shutdown_channel: &mut broadcast::Receiver<bool>,
-    ) -> Writer<T> {
+        read_channel: Receiver<Message>,
+        shutdown_channel: &'a mut broadcast::Receiver<bool>,
+    ) -> Writer<'a> {
         Writer {
             file_path,
             read_channel,
@@ -40,7 +39,7 @@ impl<'a, T: Serialize> Writer<'a, T> {
             .await
             .unwrap()
     }
-    async fn process_message(&mut self, buf_writer: &mut BufWriter<File>, message: Message<T>) {
+    async fn process_message(&mut self, buf_writer: &mut BufWriter<File>, message: Message) {
         let bin_conf = config::legacy();
         // TODO: Alter to write compact binary representation of message
         println!("Writing Message: {:?}", message.key);
@@ -56,7 +55,7 @@ impl<'a, T: Serialize> Writer<'a, T> {
                 Some(message) = self.read_channel.recv() => self.process_message(&mut buf_writer, message).await,
                 _ = self.shutdown_channel.recv() => {
                     println!("Shutting down Writer");
-                    _ = buf_writer.flush().await.unwrap();
+                    buf_writer.flush().await.unwrap();
                     println!("Flushed");
                     break
                 }

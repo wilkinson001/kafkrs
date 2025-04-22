@@ -6,5 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+arrow = "55.0.0"
+arrow-array = "55.0.0"
+arrow-schema = "55.0.0"
 chrono = { version = "0.4.38", features = ["serde"] }
 serde = { version = "1.0.198", features = ["derive"] }

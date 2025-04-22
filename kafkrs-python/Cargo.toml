@@ -12,11 +12,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22.2", features = ["extension-module"] }
 kafkrs-models = { path = "../kafkrs-models" }
 chrono = "0.4.38"
-bincode = { version = "2.0.0-rc.3", default-features = false, features = [
-  "std",
-  "serde",
-  "alloc",
-] }
+bincode = { version = "2.0.1", features = ["serde"] }
 
 [build-dependencies]
 pyo3-build-config = "0.22.2"

@@ -34,7 +34,7 @@ async fn main() {
     let (tx, rx): (Sender<Message>, Receiver<Message>) = channel(20);
     let mut set = JoinSet::new();
     set.spawn(async move {
-        let mut writer = Writer::new(config.logfile, rx, &mut shutdown_rx);
+        let mut writer = Writer::new(config.logfile, rx, &mut shutdown_rx).await;
         writer.process().await
     });
     set.spawn(async move {

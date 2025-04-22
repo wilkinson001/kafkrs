@@ -1,65 +1,86 @@
 use std::path::Path;
 
-use bincode::config;
-use bincode::serde::encode_to_vec;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use arrow::record_batch::RecordBatch;
+use arrow_ipc::writer::FileWriter;
+use arrow_schema::Schema;
+use std::fs::File;
+use std::io::BufWriter;
+use tokio::fs::OpenOptions;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Receiver;
 
-use kafkrs_models::message::Message;
+use kafkrs_models::message::{arrow_schema, messages_to_recordbatch, Message};
 
 pub struct Writer<'a> {
     file_path: String,
     read_channel: Receiver<Message>,
     shutdown_channel: &'a mut broadcast::Receiver<bool>,
+    arrow_writer: FileWriter<BufWriter<File>>,
+    buffer: Vec<Message>,
+}
+
+async fn file(file_path: &String) -> File {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        panic!("File at {:?} does not exist", file_path)
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .unwrap();
+    file.into_std().await
 }
 
 impl<'a> Writer<'a> {
-    pub fn new(
+    pub async fn new(
         file_path: String,
         read_channel: Receiver<Message>,
         shutdown_channel: &'a mut broadcast::Receiver<bool>,
     ) -> Writer<'a> {
+        let file: File = file(&file_path).await;
+        let schema: Schema = arrow_schema();
+        let arrow_writer: FileWriter<BufWriter<File>> =
+            match FileWriter::try_new_buffered(file, &schema) {
+                Ok(writer) => writer,
+                Err(e) => panic!("Problem opening file: {e:?}"),
+            };
+        let buffer: Vec<Message> = Vec::new();
+
         Writer {
             file_path,
             read_channel,
             shutdown_channel,
+            arrow_writer,
+            buffer,
         }
-    }
-    async fn file(&mut self) -> File {
-        let path = Path::new(&self.file_path);
-        if !path.exists() {
-            panic!("File at {:?} does not exist", self.file_path)
-        }
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await
-            .unwrap()
-    }
-    async fn process_message(&mut self, buf_writer: &mut BufWriter<File>, message: Message) {
-        let bin_conf = config::legacy();
-        // TODO: Alter to write compact binary representation of message
-        println!("Writing Message: {:?}", message.key);
-        let de_mes = encode_to_vec(&message, bin_conf).unwrap();
-        let _ = buf_writer.write(&de_mes).await;
-        println!("Message {:?} written successfully!", message.key)
     }
 
     pub async fn process(&mut self) {
-        let mut buf_writer = BufWriter::new(self.file().await);
         loop {
             tokio::select! {
-                Some(message) = self.read_channel.recv() => self.process_message(&mut buf_writer, message).await,
+                Some(message) = self.read_channel.recv() => self.process_arrow_message(message).await,
                 _ = self.shutdown_channel.recv() => {
                     println!("Shutting down Writer");
-                    buf_writer.flush().await.unwrap();
+                    let _ = self.arrow_writer.flush();
+                    let _ = self.arrow_writer.finish();
                     println!("Flushed");
                     break
                 }
             }
         }
+    }
+
+    async fn process_arrow_message(&mut self, message: Message) {
+        self.buffer.push(message);
+        if self.buffer.len() == 100 {
+            self.process_arrow_messages();
+            self.buffer.truncate(0);
+        }
+    }
+    fn process_arrow_messages(&mut self) {
+        let batch: RecordBatch = messages_to_recordbatch(&self.buffer);
+        self.arrow_writer.write(&batch).unwrap()
     }
 }

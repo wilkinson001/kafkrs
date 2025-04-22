@@ -21,10 +21,10 @@ toml = "0.8.12"
 kafkrs-models = { path = "../kafkrs-models" }
 clap = { version = "4.5.4", features = ["derive"] }
 serde = { version = "1.0.198", features = ["derive"] }
-bincode = { version = "2.0.0-rc.3", default-features = false, features = [
-  "std",
-  "serde",
-  "alloc",
-] }
 # Dev
 pre-commit-hooks = "0.3"
+arrow-ipc = "55.0.0"
+arrow = "55.0.0"
+arrow-schema = "55.0.0"
+bincode = { version = "2.0.1", features = ["serde"] }
+arrow-array = "55.0.0"

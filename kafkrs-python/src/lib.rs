@@ -6,10 +6,19 @@ use pyo3::types::PyBytes;
 use kafkrs_models::message::Message;
 
 #[pyfunction]
-fn encode_message(py: Python, key: String, value: String) -> PyResult<Bound<PyBytes>> {
-    let message: Message<String> = Message {
+#[pyo3(signature = (key, value, schema, partition))]
+fn encode_message(
+    py: Python,
+    key: String,
+    value: String,
+    schema: Option<String>,
+    partition: Option<String>,
+) -> PyResult<Bound<PyBytes>> {
+    let message: Message = Message {
         key,
-        value,
+        value: value.into(),
+        schema,
+        partition,
         timestamp: chrono::offset::Utc::now(),
     };
     let bin_conf = config::legacy();

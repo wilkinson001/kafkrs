@@ -6,15 +6,16 @@ use arrow_schema::Schema;
 use std::fs::File;
 use std::io::BufWriter;
 use tokio::fs::OpenOptions;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc::Receiver;
+use tokio_util::sync::CancellationToken;
 
 use kafkrs_models::message::{arrow_schema, messages_to_recordbatch, Message};
 
-pub struct Writer<'a> {
+pub struct Writer {
     file_path: String,
     read_channel: Receiver<Message>,
-    shutdown_channel: &'a mut broadcast::Receiver<bool>,
+    cancellation_token: CancellationToken,
+    topic: String,
     arrow_writer: FileWriter<BufWriter<File>>,
     buffer: Vec<Message>,
 }
@@ -33,13 +34,17 @@ async fn file(file_path: &String) -> File {
     file.into_std().await
 }
 
-impl<'a> Writer<'a> {
+impl Writer {
     pub async fn new(
         file_path: String,
         read_channel: Receiver<Message>,
-        shutdown_channel: &'a mut broadcast::Receiver<bool>,
-    ) -> Writer<'a> {
-        let file: File = file(&file_path).await;
+        cancellation_token: CancellationToken,
+        topic: String,
+    ) -> Writer {
+        let mut file_name: String = file_path.to_owned();
+        let owned_topic: String = topic.to_owned();
+        file_name.push_str(&owned_topic);
+        let file: File = file(&file_name).await;
         let schema: Schema = arrow_schema();
         let arrow_writer: FileWriter<BufWriter<File>> =
             match FileWriter::try_new_buffered(file, &schema) {
@@ -51,7 +56,8 @@ impl<'a> Writer<'a> {
         Writer {
             file_path,
             read_channel,
-            shutdown_channel,
+            cancellation_token,
+            topic,
             arrow_writer,
             buffer,
         }
@@ -61,7 +67,7 @@ impl<'a> Writer<'a> {
         loop {
             tokio::select! {
                 Some(message) = self.read_channel.recv() => self.process_arrow_message(message).await,
-                _ = self.shutdown_channel.recv() => {
+                () = self.cancellation_token.cancelled() => {
                     println!("Shutting down Writer");
                     let _ = self.arrow_writer.flush();
                     let _ = self.arrow_writer.finish();

@@ -28,3 +28,4 @@ arrow = "55.0.0"
 arrow-schema = "55.0.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 arrow-array = "55.0.0"
+tokio-util = { version = "0.7.15", features = ["rt"] }

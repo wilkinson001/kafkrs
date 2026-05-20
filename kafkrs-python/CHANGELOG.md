@@ -1,0 +1,25 @@
+# Changelog — `kafkrs-python`
+
+All notable changes to this crate are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
+
+## [0.2.0] — 2026-05-20
+
+Storage subsystem rewrite. The single-file Arrow IPC writer is replaced by a per-partition WAL + Parquet-on-object-store model with offset-resumable reads, three-tier read resolution, and an asynchronous uploader. See `docs/superpowers/specs/2026-05-18-storage-model-design.md` for the design rationale and `docs/superpowers/plans/2026-05-19-storage-model.md` for the implementation plan.
+
+**This is a breaking release across all three crates.** No migration path from 0.1.0 data on disk; the WAL format, segment format, and wire envelope are all new.
+
+### Changed
+- **Breaking:** `encode_message(key, value, schema, partition)` is now `encode_message(key, value, schema_id, timestamp_ns=0)`.
+  - `key`: `str` → `bytes` (`Vec<u8>`).
+  - `value`: already `bytes`; serialisation unchanged.
+  - `schema: Option<str>` → `schema_id: u32` (producer-assigned tag; `0` means "no schema / opaque").
+  - `partition` parameter removed (partition routing is request envelope metadata, not record-level).
+  - New `timestamp_ns: i64 = 0` parameter; `0` means "broker-stamps it on arrival".
+- Bincode encoding switched from `config::legacy()` to `config::standard()` to match the new server-side framing.
+- Now imports `kafkrs_models::record::Record` (was `kafkrs_models::message::Message`).
+
+## [0.1.0]
+
+Initial prototype: Python bindings exposing `encode_message(key, value, schema, partition)` that bincode-encoded a `kafkrs_models::message::Message` for the single-broker TCP listener. Replaced wholesale by 0.2.0.

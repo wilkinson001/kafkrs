@@ -3,28 +3,35 @@ use bincode::serde::encode_to_vec;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use kafkrs_models::message::Message;
+use kafkrs_models::record::Record;
 
 #[pyfunction]
-#[pyo3(signature = (key, value, schema, partition))]
-fn encode_message(
-    py: Python,
-    key: String,
-    value: String,
-    schema: Option<String>,
-    partition: Option<String>,
-) -> PyResult<Bound<PyBytes>> {
-    let message: Message = Message {
-        key,
-        value: value.into(),
-        schema,
-        partition,
-        timestamp: chrono::offset::Utc::now(),
+#[pyo3(signature = (key, value, schema_id, timestamp_ns=0))]
+fn encode_message<'py>(
+    py: Python<'py>,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    schema_id: u32,
+    timestamp_ns: i64,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let ts: i64 = if timestamp_ns != 0 {
+        timestamp_ns
+    } else {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64
     };
-    let bin_conf = config::legacy();
-    let bin_mess = encode_to_vec(&message, bin_conf).unwrap();
-    let py_mess = PyBytes::new_bound(py, &bin_mess);
-    Ok(py_mess)
+    let record: Record = Record {
+        offset: 0, // assigned by the broker at commit time
+        timestamp_ns: ts,
+        schema_id,
+        key,
+        value,
+    };
+    let bin: Vec<u8> = encode_to_vec(&record, config::standard()).unwrap();
+    Ok(PyBytes::new_bound(py, &bin))
 }
 
 #[pymodule]

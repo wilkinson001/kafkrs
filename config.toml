@@ -1,3 +1,15 @@
 address = "127.0.0.1"
-port = 5432
-logfile = "./data/log"
+ports = [5432]
+data_dir = "./data"
+
+[broker]
+disk_type = "nvme"
+auto_create_topics = false
+default_partition_count = 1
+
+[object_store]
+backend = "filesystem"
+bucket = "kafkrs-data"
+prefix = ""
+endpoint = ""
+region = "us-east-1"

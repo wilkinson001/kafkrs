@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-pub(crate) fn load_config(file_path: String) -> Config {
+pub fn load_config(file_path: String) -> Config {
     let res = fs::read_to_string(Path::new(&file_path));
 
     let contents: String = match res {

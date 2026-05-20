@@ -393,77 +393,22 @@ git commit -m "wire: generate Rust bindings for v1.proto via prost-build"
 ## Task 4: Add wire dependencies to kafkrs-server
 
 **Files:**
-- Modify: `kafkrs-server/Cargo.toml`
+- Modify: `kafkrs-server/Cargo.toml` (via `cargo add`)
+- Modify: `Cargo.lock`
 
-- [ ] **Step 1: Add prost and tokio-util-codec; remove bincode**
+Leave `bincode` in place — it is still referenced by `listener.rs`. Task 11 removes it once `listener.rs` is deleted in Task 9.
 
-Edit `kafkrs-server/Cargo.toml` to add `prost = "0.13"` and `tokio-util = { version = "0.7", features = ["codec"] }`, and remove the `bincode` dependency:
+- [ ] **Step 1: Add prost**
 
-```toml
-[package]
-name = "kafkrs-server"
-version = "0.2.0"
-edition = "2021"
+Run: `cargo add prost -p kafkrs-server`
+Expected: `kafkrs-server/Cargo.toml` gains a `prost = "<latest>"` line under `[dependencies]`.
 
-[lib]
-name = "kafkrs_server"
-path = "src/lib.rs"
+- [ ] **Step 2: Add tokio-util with the codec feature**
 
-[[bin]]
-name = "kafkrs-server"
-path = "src/main.rs"
+Run: `cargo add tokio-util --features codec -p kafkrs-server`
+Expected: `kafkrs-server/Cargo.toml` gains `tokio-util = { version = "<latest>", features = ["codec"] }`.
 
-[dependencies]
-log = "0.4.21"
-tokio = { version = "1.37.0", features = [
-  "fs",
-  "rt",
-  "rt-multi-thread",
-  "macros",
-  "signal",
-  "sync",
-  "io-util",
-  "net",
-  "time",
-] }
-tokio-util = { version = "0.7", features = ["codec"] }
-toml = "0.8.12"
-kafkrs-models = { path = "../kafkrs-models" }
-clap = { version = "4.5.4", features = ["derive"] }
-serde = { version = "1.0.198", features = ["derive"] }
-pre-commit-hooks = "0.3"
-env_logger = "0.11"
-arrow = "55.0.0"
-arrow-schema = "55.0.0"
-arrow-array = "55.0.0"
-object_store = { version = "0.11", features = ["aws"] }
-bytes = "1"
-anyhow = "1"
-serde_json = "1.0"
-parquet = "55.0.0"
-crc32c = "0.6"
-prost = "0.13"
-
-[dev-dependencies]
-tempfile = "3"
-```
-
-- [ ] **Step 2: Verify it compiles**
-
-Run: `cargo check -p kafkrs-server`
-Expected: success — `listener.rs` still uses `bincode` and will fail. **Expected failure** at this step is the listener compile error.
-
-If the listener compile error appears, that confirms the dep removal worked. Leave the listener broken; Task 9 deletes it wholesale.
-
-Actually — to keep the tree compilable across the plan, keep `bincode` in `Cargo.toml` for now and remove it at the end (Task 18). Revert to:
-
-```toml
-bincode = { version = "2.0.1", features = ["serde"] }
-```
-
-(re-add it). The removal happens at the cleanup task once `listener.rs` is gone.
-
-- [ ] **Step 3: Re-verify with bincode kept**
+- [ ] **Step 3: Verify it compiles**
 
 Run: `cargo check -p kafkrs-server`
 Expected: success.
@@ -471,7 +416,7 @@ Expected: success.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add kafkrs-server/Cargo.toml
+git add kafkrs-server/Cargo.toml Cargo.lock
 git commit -m "deps: add prost + tokio-util/codec to kafkrs-server"
 ```
 

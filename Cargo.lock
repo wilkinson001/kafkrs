@@ -1293,10 +1293,12 @@ dependencies = [
  "object_store",
  "parquet",
  "pre-commit-hooks",
+ "prost",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 0.8.20",
 ]
 

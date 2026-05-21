@@ -17,8 +17,8 @@ pub enum FrameError {
     TooLarge(usize),
     #[error("frame malformed: {0}")]
     Malformed(&'static str),
-    #[error("protobuf decode failed")]
-    ProstDecode,
+    #[error("protobuf encode/decode failed")]
+    ProstError,
 }
 
 /// Encode a Frame to the on-wire bytes (total_size + command_size + command +
@@ -32,7 +32,9 @@ pub fn encode_frame(frame: &Frame) -> Result<Bytes, FrameError> {
         .and_then(|n| n.checked_add(payload_len))
         .ok_or(FrameError::TooLarge(usize::MAX))?;
     // Whole-frame check: outer 4 bytes (total_size field) + total_size.
-    let whole = total_size.checked_add(4).ok_or(FrameError::TooLarge(usize::MAX))?;
+    let whole = total_size
+        .checked_add(4)
+        .ok_or(FrameError::TooLarge(usize::MAX))?;
     if whole > MAX_FRAME_SIZE {
         return Err(FrameError::TooLarge(whole));
     }
@@ -42,7 +44,7 @@ pub fn encode_frame(frame: &Frame) -> Result<Bytes, FrameError> {
     frame
         .command
         .encode(&mut buf)
-        .map_err(|_| FrameError::ProstDecode)?;
+        .map_err(|_| FrameError::ProstError)?;
     buf.extend_from_slice(&frame.payload);
     Ok(buf.freeze())
 }
@@ -52,15 +54,22 @@ pub fn encode_frame(frame: &Frame) -> Result<Bytes, FrameError> {
 /// command (command_size B) + payload (rest).
 pub fn decode_frame_body(body: &[u8]) -> Result<Frame, FrameError> {
     if body.len() < 4 {
-        return Err(FrameError::Malformed("body shorter than command_size prefix"));
+        return Err(FrameError::Malformed(
+            "body shorter than command_size prefix",
+        ));
     }
     let command_size = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
-    if body.len() < 4 + command_size {
-        return Err(FrameError::Malformed("body shorter than declared command_size"));
+    let cmd_end = 4usize
+        .checked_add(command_size)
+        .ok_or(FrameError::Malformed("command_size too large"))?;
+    if body.len() < cmd_end {
+        return Err(FrameError::Malformed(
+            "body shorter than declared command_size",
+        ));
     }
-    let command_bytes = &body[4..4 + command_size];
-    let command = Command::decode(command_bytes).map_err(|_| FrameError::ProstDecode)?;
-    let payload = Bytes::copy_from_slice(&body[4 + command_size..]);
+    let command_bytes = &body[4..cmd_end];
+    let command = Command::decode(command_bytes).map_err(|_| FrameError::ProstError)?;
+    let payload = Bytes::copy_from_slice(&body[cmd_end..]);
     Ok(Frame { command, payload })
 }
 
@@ -154,5 +163,42 @@ mod tests {
         buf.extend_from_slice(b"abcd");
         let err = decode_frame_body(&buf).unwrap_err();
         assert!(matches!(err, FrameError::Malformed(_)));
+    }
+
+    #[test]
+    fn encode_accepts_exact_max_frame_size() {
+        // Build a Command whose serialized size + outer 8 bytes is exactly MAX_FRAME_SIZE.
+        // The bulk goes in the payload (raw bytes) which is sized to make total = MAX_FRAME_SIZE.
+        //
+        // We size the payload such that:
+        //   outer 4 + command_size 4 + cmd_bytes_len + payload_len = MAX_FRAME_SIZE
+        let cmd = Command {
+            correlation_id: 1,
+            body: Some(Body::Ping(PingRequest {})),
+        };
+        let cmd_len = cmd.encoded_len();
+        let payload_len = MAX_FRAME_SIZE - 4 - 4 - cmd_len;
+        let frame = Frame {
+            command: cmd,
+            payload: Bytes::from(vec![0u8; payload_len]),
+        };
+        let bytes = encode_frame(&frame).expect("frame of exactly MAX_FRAME_SIZE must be accepted");
+        assert_eq!(bytes.len(), MAX_FRAME_SIZE);
+    }
+
+    #[test]
+    fn encode_rejects_one_byte_over_max() {
+        let cmd = Command {
+            correlation_id: 1,
+            body: Some(Body::Ping(PingRequest {})),
+        };
+        let cmd_len = cmd.encoded_len();
+        let payload_len = MAX_FRAME_SIZE - 4 - 4 - cmd_len + 1; // one byte over
+        let frame = Frame {
+            command: cmd,
+            payload: Bytes::from(vec![0u8; payload_len]),
+        };
+        let err = encode_frame(&frame).unwrap_err();
+        assert!(matches!(err, FrameError::TooLarge(_)));
     }
 }

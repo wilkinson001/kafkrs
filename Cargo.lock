@@ -1283,7 +1283,6 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
- "bincode",
  "bytes",
  "clap",
  "crc32c",

@@ -5,11 +5,13 @@
 
 use crate::fetcher::{fetch, FetchRequest};
 use crate::partition_writer::{IncomingRecord, PwMsg};
+use crate::startup::spawn_partition;
 use crate::topic_registry::{RegistryError, RegistryMsg};
 use crate::wire::errors::{fetch_error_code, make_error, registry_error_code};
 use crate::wire::frame::Frame;
 use bytes::Bytes;
-use kafkrs_models::topic::TopicConfigOverrides as TopicConfigOverridesModel;
+use kafkrs_models::config::DiskType;
+use kafkrs_models::topic::{ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel};
 use kafkrs_models::wire::v1::{
     command::Body, Command, ConnectedResponse, CreateTopicResponse, DescribeTopicResponse,
     ErrorCode, FetchResponse, ListTopicsResponse, OutRecordMeta, PongResponse, ProduceResponse,
@@ -39,6 +41,9 @@ pub struct SharedState {
     pub prefix: String,
     pub auto_create: bool,
     pub default_partition_count: u32,
+    /// Needed by the auto-create path to spawn partition workers.
+    pub data_dir: String,
+    pub disk_type: DiskType,
 }
 
 // ---- Per-RPC handlers ----
@@ -141,7 +146,27 @@ pub async fn handle_produce(
             };
         }
         match rr.await {
-            Ok(Ok(())) | Ok(Err(RegistryError::AlreadyExists)) => { /* topic is now (or was) present */ }
+            Ok(Ok(())) => {
+                // Newly created: spawn partition workers so they are present in
+                // state.partitions before the produce handle-lookup below.
+                let cfg = ResolvedTopicConfig::resolve(
+                    &TopicConfigOverridesModel::default(),
+                    state.disk_type.clone(),
+                );
+                for p in 0..state.default_partition_count {
+                    spawn_partition(
+                        &state.data_dir,
+                        &topic,
+                        p,
+                        cfg.clone(),
+                        state.store.clone(),
+                        state.prefix.clone(),
+                        state.partitions.clone(),
+                    )
+                    .await;
+                }
+            }
+            Ok(Err(RegistryError::AlreadyExists)) => { /* partition workers already running */ }
             Ok(Err(RegistryError::Io(msg))) => {
                 return Frame {
                     command: make_error(

@@ -79,14 +79,8 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
     // Spin up a topic registry actor (needed for SharedState even if not used by
     // produce/fetch in this test).
     let (reg_tx, reg_rx) = mpsc::channel(8);
-    let registry = TopicRegistry::load(
-        dd.into(),
-        DiskType::Nvme,
-        store.clone(),
-        "".into(),
-        reg_rx,
-    )
-    .unwrap();
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
     tokio::spawn(registry.run());
 
     let state = SharedState {
@@ -96,6 +90,8 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         prefix: "".into(),
         auto_create: false,
         default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -163,7 +159,9 @@ async fn connect_produce_fetch_roundtrip() {
             }],
         })),
     };
-    sock.write_all(&encode(&produce, b"keyvalue")).await.unwrap();
+    sock.write_all(&encode(&produce, b"keyvalue"))
+        .await
+        .unwrap();
     let (resp, _) = read_frame(&mut sock).await;
     assert_eq!(resp.correlation_id, 2);
     match resp.body {

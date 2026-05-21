@@ -4,6 +4,7 @@ pub mod object_store;
 pub mod partition_writer;
 pub mod recovery;
 pub mod segment;
+pub mod startup;
 pub mod topic_registry;
 pub mod uploader;
 pub mod wal_writer;

@@ -51,30 +51,45 @@ class Client:
         self._lock = asyncio.Lock()  # serialize on-socket I/O
 
     async def connect(self) -> None:
+        """Open the TCP connection and perform the Connect handshake."""
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
-        cmd = v1_pb2.Command()
-        cid = self._next_id()
-        cmd.correlation_id = cid
-        cmd.connect.protocol_version = PROTOCOL_VERSION
-        cmd.connect.client_id = self._client_id
-        resp, _ = await self._roundtrip(cmd, b"")
-        if resp.WhichOneof("body") == "error":
-            raise WireError(resp.error.code, resp.error.message)
-        if resp.WhichOneof("body") != "connected":
-            raise WireError(0, f"unexpected response to Connect: {resp.WhichOneof('body')}")
-        if resp.connected.protocol_version != PROTOCOL_VERSION:
-            raise WireError(
-                0,
-                f"broker protocol_version={resp.connected.protocol_version}; client={PROTOCOL_VERSION}",
-            )
+        try:
+            cmd = v1_pb2.Command()
+            cid = self._next_id()
+            cmd.correlation_id = cid
+            cmd.connect.protocol_version = PROTOCOL_VERSION
+            cmd.connect.client_id = self._client_id
+            resp, _ = await self._roundtrip(cmd, b"")
+            if resp.WhichOneof("body") == "error":
+                raise WireError(resp.error.code, resp.error.message)
+            if resp.WhichOneof("body") != "connected":
+                raise WireError(0, f"unexpected response to Connect: {resp.WhichOneof('body')}")
+            if resp.connected.protocol_version != PROTOCOL_VERSION:
+                raise WireError(
+                    0,
+                    f"broker protocol_version={resp.connected.protocol_version}; client={PROTOCOL_VERSION}",
+                )
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
+        """Close the TCP connection. Safe to call multiple times."""
         if self._writer is not None:
             self._writer.close()
             try:
                 await self._writer.wait_closed()
             except Exception:
                 pass
+        self._reader = None
+        self._writer = None
+
+    async def __aenter__(self) -> "Client":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
 
     async def produce(
         self,
@@ -175,7 +190,8 @@ class Client:
 
     async def _roundtrip(self, cmd: v1_pb2.Command, payload: bytes) -> Tuple[v1_pb2.Command, bytes]:
         async with self._lock:
-            assert self._reader is not None and self._writer is not None
+            if self._reader is None or self._writer is None:
+                raise RuntimeError("Client is not connected; call connect() first")
             cmd_bytes = cmd.SerializeToString()
             total_size = 4 + len(cmd_bytes) + len(payload)
             if 4 + total_size > MAX_FRAME_SIZE:

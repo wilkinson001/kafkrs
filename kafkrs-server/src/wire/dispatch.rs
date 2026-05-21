@@ -11,7 +11,9 @@ use crate::wire::errors::{fetch_error_code, make_error, registry_error_code};
 use crate::wire::frame::Frame;
 use bytes::Bytes;
 use kafkrs_models::config::DiskType;
-use kafkrs_models::topic::{ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel};
+use kafkrs_models::topic::{
+    ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel,
+};
 use kafkrs_models::wire::v1::{
     command::Body, Command, ConnectedResponse, CreateTopicResponse, DescribeTopicResponse,
     ErrorCode, FetchResponse, ListTopicsResponse, OutRecordMeta, PongResponse, ProduceResponse,

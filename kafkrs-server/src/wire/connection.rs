@@ -45,10 +45,7 @@ pub async fn accept_loop(listener: TcpListener, state: SharedState) {
     }
 }
 
-async fn run_connection(
-    socket: tokio::net::TcpStream,
-    state: SharedState,
-) {
+async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
     let (rd, mut wr) = socket.into_split();
     // Reader uses LengthDelimitedCodec to strip the outer total_size prefix.
     // The bytes it hands us start with command_size + protobuf + payload.

@@ -83,8 +83,8 @@ pub async fn spawn_partition(
     });
 
     tokio::spawn(pw.run());
-    partitions
-        .write()
-        .await
-        .insert((topic.to_string(), partition), PartitionHandle { pw_tx, tail });
+    partitions.write().await.insert(
+        (topic.to_string(), partition),
+        PartitionHandle { pw_tx, tail },
+    );
 }

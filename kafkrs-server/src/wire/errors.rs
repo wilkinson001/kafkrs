@@ -2,9 +2,7 @@
 
 use crate::fetcher::FetchError;
 use crate::topic_registry::RegistryError;
-use kafkrs_models::wire::v1::{
-    command::Body, Command, ErrorCode, ErrorResponse,
-};
+use kafkrs_models::wire::v1::{command::Body, Command, ErrorCode, ErrorResponse};
 
 /// Build an Error Command with the given code, message, and echo correlation_id.
 pub fn make_error(correlation_id: u64, code: ErrorCode, message: impl Into<String>) -> Command {
@@ -39,10 +37,22 @@ mod tests {
 
     #[test]
     fn fetch_error_mapping_is_total_and_correct() {
-        assert_eq!(fetch_error_code(&FetchError::UnknownTopic), ErrorCode::ErrUnknownTopic);
-        assert_eq!(fetch_error_code(&FetchError::UnknownPartition), ErrorCode::ErrUnknownPartition);
-        assert_eq!(fetch_error_code(&FetchError::OffsetOutOfRange), ErrorCode::ErrOffsetOutOfRange);
-        assert_eq!(fetch_error_code(&FetchError::BrokerNotReady), ErrorCode::ErrBrokerNotReady);
+        assert_eq!(
+            fetch_error_code(&FetchError::UnknownTopic),
+            ErrorCode::ErrUnknownTopic
+        );
+        assert_eq!(
+            fetch_error_code(&FetchError::UnknownPartition),
+            ErrorCode::ErrUnknownPartition
+        );
+        assert_eq!(
+            fetch_error_code(&FetchError::OffsetOutOfRange),
+            ErrorCode::ErrOffsetOutOfRange
+        );
+        assert_eq!(
+            fetch_error_code(&FetchError::BrokerNotReady),
+            ErrorCode::ErrBrokerNotReady
+        );
     }
 
     #[test]

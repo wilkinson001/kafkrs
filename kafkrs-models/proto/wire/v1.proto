@@ -1,0 +1,166 @@
+syntax = "proto3";
+package kafkrs.wire.v1;
+
+// Top-level envelope. Every frame on the wire carries exactly one Command.
+message Command {
+  // Reserved for v1.5+ streaming-consumer RPCs:
+  //   Subscribe / Subscribed / Flow / Message / Ack / Unsubscribe
+  reserved 40 to 49;
+  // Reserved for v1.5+ admin RPCs:
+  //   DeleteTopic / DeleteTopicResp / AlterConfig / AlterConfigResp / BrokerInfo
+  reserved 50 to 59;
+
+  uint64 correlation_id = 1;
+
+  oneof body {
+    // Connection lifecycle (10-19)
+    ConnectRequest         connect               = 10;
+    ConnectedResponse      connected             = 11;
+    PingRequest            ping                  = 12;
+    PongResponse           pong                  = 13;
+
+    // Data plane (20-29)
+    ProduceRequest         produce               = 20;
+    ProduceResponse        produce_resp          = 21;
+    FetchRequest           fetch                 = 22;
+    FetchResponse          fetch_resp            = 23;
+
+    // Control plane (30-39)
+    CreateTopicRequest     create_topic          = 30;
+    CreateTopicResponse    create_topic_resp     = 31;
+    DescribeTopicRequest   describe_topic        = 32;
+    DescribeTopicResponse  describe_topic_resp   = 33;
+    ListTopicsRequest      list_topics           = 34;
+    ListTopicsResponse     list_topics_resp      = 35;
+
+    // Errors
+    ErrorResponse          error                 = 99;
+  }
+}
+
+// ---- Connection lifecycle ----
+
+message ConnectRequest {
+  uint32 protocol_version = 1;
+  string client_id        = 2;
+  bytes  auth_data        = 3;
+}
+
+message ConnectedResponse {
+  uint32 protocol_version = 1;
+  string broker_id        = 2;
+}
+
+message PingRequest  {}
+message PongResponse {}
+
+// ---- Data plane ----
+
+// Producer-side record metadata. Payload bytes follow the Command in the order
+// of this list: key1 || value1 || key2 || value2 || ...
+message InRecordMeta {
+  uint32 key_len      = 1;
+  uint32 value_len    = 2;
+  uint32 schema_id    = 3;
+  int64  timestamp_ns = 4;
+}
+
+message ProduceRequest {
+  string topic                  = 1;
+  uint32 partition              = 2;
+  repeated InRecordMeta records = 3;
+}
+
+message ProduceResponse {
+  int64 base_offset = 1;
+  int64 last_offset = 2;
+  int64 hwm         = 3;
+}
+
+// Broker-side record metadata (includes broker-assigned offset).
+message OutRecordMeta {
+  int64  offset       = 1;
+  int64  timestamp_ns = 2;
+  uint32 schema_id    = 3;
+  uint32 key_len      = 4;
+  uint32 value_len    = 5;
+}
+
+message FetchRequest {
+  string topic        = 1;
+  uint32 partition    = 2;
+  int64  from_offset  = 3;
+  uint32 max_records  = 4;
+  uint32 max_wait_ms  = 5;
+}
+
+message FetchResponse {
+  repeated OutRecordMeta records = 1;
+  int64    hwm                   = 2;
+}
+
+// ---- Control plane ----
+
+message TopicConfigOverrides {
+  optional uint64 segment_size_bytes        = 1;
+  optional uint64 segment_seal_time_ms      = 2;
+  optional uint32 max_key_size_bytes        = 3;
+  optional uint32 max_value_size_bytes      = 4;
+  optional uint64 group_commit_time_ms      = 5;
+  optional uint64 group_commit_size_bytes   = 6;
+  optional uint32 group_commit_record_count = 7;
+}
+
+message CreateTopicRequest {
+  string topic                   = 1;
+  uint32 partition_count         = 2;
+  TopicConfigOverrides overrides = 3;
+}
+message CreateTopicResponse {}
+
+message DescribeTopicRequest  { string topic = 1; }
+message DescribeTopicResponse {
+  string topic                = 1;
+  uint32 partition_count      = 2;
+  int64  created_at_ns        = 3;
+  TopicConfigOverrides config = 4;
+}
+
+message ListTopicsRequest  {}
+message ListTopicsResponse { repeated string topics = 1; }
+
+// ---- Errors ----
+
+message ErrorResponse {
+  ErrorCode code    = 1;
+  string    message = 2;
+}
+
+enum ErrorCode {
+  ERR_UNSPECIFIED                  = 0;
+
+  // Connection-level (1xx)
+  ERR_UNSUPPORTED_PROTOCOL_VERSION = 100;
+  ERR_HANDSHAKE_REQUIRED           = 101;
+  ERR_ALREADY_CONNECTED            = 102;
+  ERR_AUTH_FAILED                  = 103;
+  ERR_MALFORMED_FRAME              = 104;
+  ERR_FRAME_TOO_LARGE              = 105;
+  ERR_INVALID_COMMAND              = 106;
+
+  // Data plane (2xx)
+  ERR_UNKNOWN_TOPIC                = 200;
+  ERR_UNKNOWN_PARTITION            = 201;
+  ERR_OFFSET_OUT_OF_RANGE          = 202;
+  ERR_RECORD_TOO_LARGE             = 203;
+  ERR_KEY_TOO_LARGE                = 204;
+  ERR_BROKER_NOT_READY             = 205;
+
+  // Control plane (3xx)
+  ERR_TOPIC_ALREADY_EXISTS         = 300;
+  ERR_INVALID_TOPIC_NAME           = 301;
+  ERR_INVALID_PARTITION_COUNT      = 302;
+
+  // Internal (9xx)
+  ERR_INTERNAL                     = 900;
+}

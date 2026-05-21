@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: kafkrs-models/proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Allow our envelope ErrorResponse to coexist with the same name pattern at v1.
+    - PACKAGE_DIRECTORY_MATCH
+    # Kafka protocol uses ERR_* naming convention for error codes, not ERROR_CODE_* prefix.
+    - ENUM_VALUE_PREFIX
+breaking:
+  use:
+    - FILE

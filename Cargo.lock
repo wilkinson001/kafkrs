@@ -1288,7 +1288,6 @@ dependencies = [
  "clap",
  "crc32c",
  "env_logger",
- "futures",
  "kafkrs-models",
  "log",
  "object_store",

@@ -9,8 +9,8 @@
 //!   no two responses interleave bytes on the socket.
 
 use crate::wire::dispatch::{
-    handle_connected, handle_create_topic, handle_describe_topic, handle_fetch,
-    handle_list_topics, handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
+    handle_connected, handle_create_topic, handle_describe_topic, handle_fetch, handle_list_topics,
+    handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
 };
 use crate::wire::errors::make_error;
 use crate::wire::frame::{decode_frame_body, encode_frame, Frame, MAX_FRAME_SIZE};
@@ -36,9 +36,8 @@ pub async fn accept_loop(listener: TcpListener, state: SharedState) {
                 debug!("accepted connection from {peer}");
                 let st = state.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_connection(socket, st).await {
-                        debug!("connection {peer} closed: {e:?}");
-                    }
+                    run_connection(socket, st).await;
+                    debug!("connection {peer} closed");
                 });
             }
             Err(e) => error!("accept error: {e}"),
@@ -46,22 +45,10 @@ pub async fn accept_loop(listener: TcpListener, state: SharedState) {
     }
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-enum ConnError {
-    Io(std::io::Error),
-}
-
-impl From<std::io::Error> for ConnError {
-    fn from(e: std::io::Error) -> Self {
-        ConnError::Io(e)
-    }
-}
-
 async fn run_connection(
     socket: tokio::net::TcpStream,
     state: SharedState,
-) -> Result<(), ConnError> {
+) {
     let (rd, mut wr) = socket.into_split();
     // Reader uses LengthDelimitedCodec to strip the outer total_size prefix.
     // The bytes it hands us start with command_size + protobuf + payload.
@@ -85,8 +72,8 @@ async fn run_connection(
             let bytes = match encode_frame(&frame) {
                 Ok(b) => b,
                 Err(e) => {
-                    error!("failed to encode outbound frame: {e}");
-                    continue;
+                    error!("failed to encode outbound frame: {e}; closing connection");
+                    break;
                 }
             };
             if wr.write_all(&bytes).await.is_err() {
@@ -187,6 +174,9 @@ async fn run_connection(
                 let resp_tx = resp_tx.clone();
                 let state = state.clone();
                 let payload = frame.payload.clone();
+                // TODO: abort in-flight per-RPC tasks on connection teardown rather than
+                // relying on resp_tx.send returning Err. A long-poll Fetch can hold a task
+                // alive for up to max_wait_ms after the client disconnects.
                 tokio::spawn(async move {
                     let response = dispatch_one(cid, body, payload, &state).await;
                     let _ = resp_tx.send(response).await;
@@ -211,7 +201,6 @@ async fn run_connection(
     drop(resp_tx);
     let _ = reader.await;
     let _ = writer.await;
-    Ok(())
 }
 
 async fn dispatch_one(

@@ -4,6 +4,26 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.3.0] — 2026-05-21
+
+Wire protocol v1 lands. See `docs/superpowers/specs/2026-05-20-wire-protocol-design.md` for the design.
+
+### Added
+- `kafkrs_server::wire` module — Pulsar-style framing (length-prefixed frames carrying a protobuf `Command` envelope plus a raw payload section), explicit `Connect` handshake, per-connection three-task model (reader / dispatcher / writer) with per-RPC task spawning for in-flight multiplexing, and structured `ErrorCode` taxonomy.
+- `kafkrs_server::startup::spawn_partition` — extracted from `main.rs` so the auto-create path can bring up partition workers on first produce.
+- `kafkrs-server/tests/wire_e2e.rs` — end-to-end TCP integration test (connect, produce, fetch, unsupported version, pre-Connect rejection).
+- Dependencies: `prost`, `tokio-util` (codec feature), `tokio-stream`, `thiserror`.
+
+### Changed
+- **Breaking:** `kafkrs_server::listener` is replaced by `kafkrs_server::wire`. The bincode `WireRequest` / `WireResponse` enums are gone; clients now speak the protobuf-framed wire described in the spec.
+- **Breaking:** Stringly-typed error responses (`WireResponse::Error(String)` with magic strings) are replaced by `ErrorCode` enum values.
+- `SharedState` gains `data_dir` and `disk_type` fields so auto-create can spawn partition actors.
+- Auto-create on produce now spawns partition workers after registering the topic (previously the topic was registered but produces returned `ERR_UNKNOWN_TOPIC`).
+
+### Removed
+- `kafkrs-server/src/listener.rs` — replaced by the `wire` module.
+- `bincode` dependency — no longer used.
+
 ## [0.2.0] — 2026-05-20
 
 Storage subsystem rewrite. The single-file Arrow IPC writer is replaced by a per-partition WAL + Parquet-on-object-store model with offset-resumable reads, three-tier read resolution, and an asynchronous uploader. See `docs/superpowers/specs/2026-05-18-storage-model-design.md` for the design rationale and `docs/superpowers/plans/2026-05-19-storage-model.md` for the implementation plan.

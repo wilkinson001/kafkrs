@@ -4,6 +4,15 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.3.0] — 2026-05-21
+
+Wire protocol v1 lands. See `docs/superpowers/specs/2026-05-20-wire-protocol-design.md` for the design.
+
+### Added
+- `kafkrs-models/proto/wire/v1.proto` — canonical protobuf schema for the kafkrs wire protocol. Defines `Command` (top-level envelope), `Connect`/`Connected`, `Ping`/`Pong`, `Produce`/`ProduceResp`, `Fetch`/`FetchResp`, `CreateTopic`/`DescribeTopic`/`ListTopics`, `Error` + `ErrorCode`. Field-number ranges `40–49` and `50–59` reserved for future streaming-consumer and admin RPCs.
+- `kafkrs-models::wire::v1` module — `prost`-generated Rust bindings, produced at compile time by `build.rs`.
+- Dependencies: `prost`, `prost-build`, `protoc-bin-vendored` (build-time, hermetic — no system protoc required).
+
 ## [0.2.0] — 2026-05-20
 
 Storage subsystem rewrite. The single-file Arrow IPC writer is replaced by a per-partition WAL + Parquet-on-object-store model with offset-resumable reads, three-tier read resolution, and an asynchronous uploader. See `docs/superpowers/specs/2026-05-18-storage-model-design.md` for the design rationale and `docs/superpowers/plans/2026-05-19-storage-model.md` for the implementation plan.

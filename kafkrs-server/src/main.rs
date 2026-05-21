@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use kafkrs_models::topic::ResolvedTopicConfig;
 
 use kafkrs_server::config;
-use kafkrs_server::listener::{Listener, PartitionHandle, SharedState};
+use kafkrs_server::wire::{accept_loop, PartitionHandle, SharedState};
 use kafkrs_server::object_store::build_store;
 use kafkrs_server::partition_writer::PartitionWriter;
 use kafkrs_server::recovery::recover_partition;
@@ -85,17 +85,7 @@ async fn main() {
         let listener: TcpListener = TcpListener::bind(&addr).await.expect("bind");
         info!("Listening on {addr}");
         let st: SharedState = state.clone();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((socket, _)) => {
-                        let st2: SharedState = st.clone();
-                        tokio::spawn(async move { Listener::new(socket, st2).process().await });
-                    }
-                    Err(e) => error!("accept error: {e}"),
-                }
-            }
-        });
+        tokio::spawn(accept_loop(listener, st));
     }
 
     match signal::ctrl_c().await {

@@ -74,6 +74,17 @@ pub async fn handle_produce(
     records_meta: Vec<kafkrs_models::wire::v1::InRecordMeta>,
     payload: Bytes,
 ) -> Frame {
+    if records_meta.is_empty() {
+        return Frame {
+            command: make_error(
+                correlation_id,
+                ErrorCode::ErrMalformedFrame,
+                "produce must contain at least one record",
+            ),
+            payload: Bytes::new(),
+        };
+    }
+
     // Slice payload into per-record (key, value) pairs using the metas.
     let mut records = Vec::with_capacity(records_meta.len());
     let mut cursor = 0usize;
@@ -114,15 +125,40 @@ pub async fn handle_produce(
     // Auto-create the topic if configured.
     if state.auto_create {
         let (r, rr) = oneshot::channel::<Result<(), RegistryError>>();
-        let _ = state
+        if state
             .registry
             .send(RegistryMsg::EnsureExists {
                 name: topic.clone(),
                 partition_count: state.default_partition_count,
                 reply: r,
             })
-            .await;
-        let _ = rr.await;
+            .await
+            .is_err()
+        {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+        match rr.await {
+            Ok(Ok(())) | Ok(Err(RegistryError::AlreadyExists)) => { /* topic is now (or was) present */ }
+            Ok(Err(RegistryError::Io(msg))) => {
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        ErrorCode::ErrInternal,
+                        format!("auto-create failed: {msg}"),
+                    ),
+                    payload: Bytes::new(),
+                };
+            }
+            Err(_) => {
+                return Frame {
+                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                    payload: Bytes::new(),
+                };
+            }
+        }
     }
 
     // Resolve the partition handle.
@@ -151,13 +187,13 @@ pub async fn handle_produce(
         };
     }
     match ack_rx.await {
-        Ok(base_offset) => Frame {
+        Ok(hwm) => Frame {
             command: Command {
                 correlation_id,
                 body: Some(Body::ProduceResp(ProduceResponse {
-                    base_offset,
-                    last_offset: base_offset + n - 1,
-                    hwm: base_offset + n - 1,
+                    base_offset: hwm - n + 1,
+                    last_offset: hwm,
+                    hwm,
                 })),
             },
             payload: Bytes::new(),

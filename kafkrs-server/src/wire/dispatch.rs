@@ -26,8 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const BROKER_ID: &str = "kafkrs-broker-v1";
 
-/// Handle to a partition's actor (mpsc to PartitionWriter + broadcast for tail
-/// subscribers). Matches the prior `listener::PartitionHandle`.
+/// Handle to a partition's actor: an mpsc sender for the PartitionWriter and a broadcast sender for tail subscribers.
 #[derive(Clone)]
 pub struct PartitionHandle {
     pub pw_tx: mpsc::Sender<PwMsg>,

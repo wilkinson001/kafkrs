@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["kafkrs-models", "kafkrs-server", "kafkrs-python"]
+members = ["kafkrs-models", "kafkrs-server"]
 
 [workspace.metadata.precommit]
 fmt = "cargo fmt"

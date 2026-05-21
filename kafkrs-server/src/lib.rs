@@ -8,3 +8,4 @@ pub mod segment;
 pub mod topic_registry;
 pub mod uploader;
 pub mod wal_writer;
+pub mod wire;

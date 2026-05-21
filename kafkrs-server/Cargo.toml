@@ -45,6 +45,7 @@ parquet = "55.0.0"
 crc32c = "0.6"
 prost = "0.14.3"
 tokio-util = { version = "0.7.18", features = ["codec"] }
+thiserror = "2.0.18"
 
 [dev-dependencies]
 tempfile = "3"

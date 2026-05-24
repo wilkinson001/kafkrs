@@ -303,7 +303,11 @@ pub async fn handle_create_topic(
     state: &SharedState,
     req: kafkrs_models::wire::v1::CreateTopicRequest,
 ) -> Frame {
+    let topic_name = req.topic.clone();
+    let partition_count = req.partition_count;
     let overrides = wire_overrides_to_model(req.overrides.unwrap_or_default());
+    let resolved_cfg = ResolvedTopicConfig::resolve(&overrides, state.disk_type.clone());
+
     let (tx, rx) = oneshot::channel::<Result<(), RegistryError>>();
     if state
         .registry
@@ -322,13 +326,28 @@ pub async fn handle_create_topic(
         };
     }
     match rx.await {
-        Ok(Ok(())) => Frame {
-            command: Command {
-                correlation_id,
-                body: Some(Body::CreateTopicResp(CreateTopicResponse {})),
-            },
-            payload: Bytes::new(),
-        },
+        Ok(Ok(())) => {
+            // Spawn partition workers so subsequent Produce/Fetch RPCs find them.
+            for p in 0..partition_count {
+                spawn_partition(
+                    &state.data_dir,
+                    &topic_name,
+                    p,
+                    resolved_cfg,
+                    state.store.clone(),
+                    state.prefix.clone(),
+                    state.partitions.clone(),
+                )
+                .await;
+            }
+            Frame {
+                command: Command {
+                    correlation_id,
+                    body: Some(Body::CreateTopicResp(CreateTopicResponse {})),
+                },
+                payload: Bytes::new(),
+            }
+        }
         Ok(Err(e)) => Frame {
             command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
             payload: Bytes::new(),

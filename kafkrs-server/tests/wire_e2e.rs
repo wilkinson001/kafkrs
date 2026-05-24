@@ -20,6 +20,50 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+async fn setup_broker_no_topics(dd: &str) -> u16 {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry = TopicRegistry::load(
+        dd.into(),
+        DiskType::Nvme,
+        store.clone(),
+        "".into(),
+        reg_rx,
+    )
+    .unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: false,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    port
+}
+
 async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
     let store = build_store(
         &ObjectStoreConfig {
@@ -252,5 +296,69 @@ async fn pre_connect_command_is_rejected() {
             );
         }
         other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_topic_then_produce_succeeds() {
+    use kafkrs_models::wire::v1::{ConnectedResponse, CreateTopicRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let port = setup_broker_no_topics(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // 1. Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "test".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert!(matches!(resp.body, Some(Body::Connected(ConnectedResponse { .. }))));
+
+    // 2. CreateTopic.
+    let create = Command {
+        correlation_id: 2,
+        body: Some(Body::CreateTopic(CreateTopicRequest {
+            topic: "explicit".into(),
+            partition_count: 1,
+            overrides: None,
+        })),
+    };
+    sock.write_all(&encode(&create, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::CreateTopicResp(_)) => {}
+        other => panic!("expected CreateTopicResp, got {other:?}"),
+    }
+
+    // 3. Produce to the just-created topic. Without Fix 1 this returns ErrUnknownTopic.
+    let produce = Command {
+        correlation_id: 3,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "explicit".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 3);
+    match resp.body {
+        Some(Body::ProduceResp(r)) => {
+            assert_eq!(r.base_offset, 0);
+            assert_eq!(r.last_offset, 0);
+        }
+        other => panic!("expected ProduceResp, got {other:?}"),
     }
 }

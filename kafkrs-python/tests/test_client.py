@@ -135,3 +135,73 @@ async def test_unsupported_version_raises(broker: int) -> None:
         assert ei.value.code == 100  # ERR_UNSUPPORTED_PROTOCOL_VERSION
     finally:
         mod.PROTOCOL_VERSION = saved
+
+
+def _write_config_no_auto_create(tmp: Path, port: int) -> Path:
+    cfg = tmp / "config.toml"
+    data_dir = tmp / "data"
+    data_dir.mkdir()
+    cfg.write_text(
+        f"""
+address = "127.0.0.1"
+ports = [{port}]
+data_dir = "{data_dir.as_posix()}"
+
+[broker]
+disk_type = "nvme"
+auto_create_topics = false
+default_partition_count = 1
+
+[object_store]
+backend = "filesystem"
+bucket = "test"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"""
+    )
+    return cfg
+
+
+@pytest.fixture
+def broker_no_auto_create():
+    _build_broker_if_needed()
+    port = _find_free_port()
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        cfg_path = _write_config_no_auto_create(tmp, port)
+        env = dict(os.environ)
+        env["RUST_LOG"] = "warn"
+        proc = subprocess.Popen(
+            [str(BROKER_BIN), str(cfg_path)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            _wait_for_port("127.0.0.1", port)
+            yield port
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_create_topic_then_produce(broker_no_auto_create: int) -> None:
+    client = Client("127.0.0.1", broker_no_auto_create)
+    await client.connect()
+    try:
+        await client.create_topic("explicit", partition_count=1)
+        base, last = await client.produce("explicit", 0, [(b"k", b"v")])
+        assert base == 0
+        assert last == 0
+
+        recs, _hwm = await client.fetch("explicit", 0, from_offset=0, max_wait_ms=200)
+        assert len(recs) == 1
+        assert recs[0].key == b"k"
+        assert recs[0].value == b"v"
+    finally:
+        await client.close()

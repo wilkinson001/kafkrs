@@ -4,6 +4,16 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.3.1] — 2026-05-24
+
+Tracks the server 0.3.1 release. See `docs/superpowers/specs/2026-05-24-tier1-fixes-design.md`.
+
+### Changed
+- Regenerated `kafkrs/wire/v1_pb2.py` to include the new `max_fetch_wait_ms` field on `TopicConfigOverrides` (proto field 8). Users can now set `overrides.max_fetch_wait_ms = N` when calling `Client.create_topic(...)`.
+
+### Added
+- `tests/test_client.py::test_create_topic_then_produce` — end-to-end test for the explicit `CreateTopic` → `Produce` path now that the server bug is fixed.
+
 ## [0.3.0] — 2026-05-21
 
 Crate restructured from a PyO3 extension to a pure-Python package. Wire protocol v1 client. See `docs/superpowers/specs/2026-05-20-wire-protocol-design.md`.

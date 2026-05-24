@@ -74,7 +74,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
     partitions
         .write()
         .await
-        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail });
+        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
 
     // Spin up a topic registry actor (needed for SharedState even if not used by
     // produce/fetch in this test).

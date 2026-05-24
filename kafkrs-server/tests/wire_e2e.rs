@@ -467,14 +467,8 @@ async fn setup_broker_with_max_fetch_wait(
         .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
 
     let (reg_tx, reg_rx) = mpsc::channel(8);
-    let registry = TopicRegistry::load(
-        dd.into(),
-        DiskType::Nvme,
-        store.clone(),
-        "".into(),
-        reg_rx,
-    )
-    .unwrap();
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
     tokio::spawn(registry.run());
 
     let state = SharedState {
@@ -584,4 +578,71 @@ async fn oversize_value_returns_err_record_too_large() {
         Some(Body::Error(e)) => assert_eq!(e.code, ErrorCode::ErrRecordTooLarge as i32),
         other => panic!("expected Error(ErrRecordTooLarge), got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn broker_stays_responsive_after_disconnect_midpoll() {
+    use kafkrs_models::wire::v1::PingRequest;
+    use tokio::time::{sleep, Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+
+    // First connection: start a long-poll Fetch, then drop without reading the response.
+    {
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let connect = Command {
+            correlation_id: 1,
+            body: Some(Body::Connect(ConnectRequest {
+                protocol_version: 1,
+                client_id: "first".into(),
+                auth_data: vec![],
+            })),
+        };
+        sock.write_all(&encode(&connect, b"")).await.unwrap();
+        let _ = read_frame(&mut sock).await;
+        let fetch = Command {
+            correlation_id: 2,
+            body: Some(Body::Fetch(FetchRequest {
+                topic: "t".into(),
+                partition: 0,
+                from_offset: 0,
+                max_records: 10,
+                max_wait_ms: 30_000, // long poll
+            })),
+        };
+        sock.write_all(&encode(&fetch, b"")).await.unwrap();
+        // Drop sock without reading the response.
+    }
+
+    // Give the broker a moment to notice the disconnect.
+    sleep(Duration::from_millis(200)).await;
+
+    // Second connection: Connect + Ping should complete quickly.
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "second".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let ping = Command {
+        correlation_id: 2,
+        body: Some(Body::Ping(PingRequest {})),
+    };
+    let start = Instant::now();
+    sock.write_all(&encode(&ping, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    let elapsed = start.elapsed();
+    assert_eq!(resp.correlation_id, 2);
+    assert!(matches!(resp.body, Some(Body::Pong(_))));
+    assert!(
+        elapsed.as_millis() < 1_000,
+        "Ping after disconnect-midpoll should complete quickly, took {} ms",
+        elapsed.as_millis()
+    );
 }

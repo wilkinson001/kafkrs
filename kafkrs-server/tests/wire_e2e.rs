@@ -37,14 +37,8 @@ async fn setup_broker_no_topics(dd: &str) -> u16 {
         Arc::new(RwLock::new(HashMap::new()));
 
     let (reg_tx, reg_rx) = mpsc::channel(8);
-    let registry = TopicRegistry::load(
-        dd.into(),
-        DiskType::Nvme,
-        store.clone(),
-        "".into(),
-        reg_rx,
-    )
-    .unwrap();
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
     tokio::spawn(registry.run());
 
     let state = SharedState {
@@ -318,7 +312,10 @@ async fn create_topic_then_produce_succeeds() {
     };
     sock.write_all(&encode(&connect, b"")).await.unwrap();
     let (resp, _) = read_frame(&mut sock).await;
-    assert!(matches!(resp.body, Some(Body::Connected(ConnectedResponse { .. }))));
+    assert!(matches!(
+        resp.body,
+        Some(Body::Connected(ConnectedResponse { .. }))
+    ));
 
     // 2. CreateTopic.
     let create = Command {
@@ -360,5 +357,97 @@ async fn create_topic_then_produce_succeeds() {
             assert_eq!(r.last_offset, 0);
         }
         other => panic!("expected ProduceResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversize_key_returns_err_key_too_large() {
+    use kafkrs_models::wire::v1::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce a key of 1025 bytes (exceeds the default 1 KiB limit).
+    let key = vec![0u8; 1025];
+    let value = vec![0u8; 1];
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&key);
+    payload.extend_from_slice(&value);
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1025,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, &payload)).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::Error(e)) => assert_eq!(e.code, ErrorCode::ErrKeyTooLarge as i32),
+        other => panic!("expected Error(ErrKeyTooLarge), got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversize_value_returns_err_record_too_large() {
+    use kafkrs_models::wire::v1::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce a value of 1 MiB + 1 byte (exceeds the default 1 MiB limit).
+    let value = vec![0u8; (1024 * 1024) + 1];
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&value);
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 0,
+                value_len: (1024 * 1024 + 1) as u32,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, &payload)).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::Error(e)) => assert_eq!(e.code, ErrorCode::ErrRecordTooLarge as i32),
+        other => panic!("expected Error(ErrRecordTooLarge), got {other:?}"),
     }
 }

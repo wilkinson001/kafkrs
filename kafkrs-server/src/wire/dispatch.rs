@@ -94,6 +94,107 @@ pub async fn handle_produce(
         };
     }
 
+    // Auto-create the topic if configured.
+    if state.auto_create {
+        let (r, rr) = oneshot::channel::<Result<(), RegistryError>>();
+        if state
+            .registry
+            .send(RegistryMsg::EnsureExists {
+                name: topic.clone(),
+                partition_count: state.default_partition_count,
+                reply: r,
+            })
+            .await
+            .is_err()
+        {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+        match rr.await {
+            Ok(Ok(())) => {
+                // Newly created: spawn partition workers so they are present in
+                // state.partitions before the produce handle-lookup below.
+                let cfg = ResolvedTopicConfig::resolve(
+                    &TopicConfigOverridesModel::default(),
+                    state.disk_type.clone(),
+                );
+                for p in 0..state.default_partition_count {
+                    spawn_partition(
+                        &state.data_dir,
+                        &topic,
+                        p,
+                        cfg,
+                        state.store.clone(),
+                        state.prefix.clone(),
+                        state.partitions.clone(),
+                    )
+                    .await;
+                }
+            }
+            Ok(Err(RegistryError::AlreadyExists)) => { /* partition workers already running */ }
+            Ok(Err(RegistryError::Io(msg))) => {
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        ErrorCode::ErrInternal,
+                        format!("auto-create failed: {msg}"),
+                    ),
+                    payload: Bytes::new(),
+                };
+            }
+            Err(_) => {
+                return Frame {
+                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                    payload: Bytes::new(),
+                };
+            }
+        }
+    }
+
+    // Resolve the partition handle — earlier than before, so the size check can read its cfg.
+    let handle = {
+        let guard = state.partitions.read().await;
+        guard.get(&(topic.clone(), partition)).cloned()
+    };
+    let Some(handle) = handle else {
+        return Frame {
+            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
+            payload: Bytes::new(),
+        };
+    };
+
+    // Per-record size check against the resolved per-topic limits.
+    for m in &records_meta {
+        if m.key_len > handle.cfg.max_key_size_bytes {
+            return Frame {
+                command: make_error(
+                    correlation_id,
+                    ErrorCode::ErrKeyTooLarge,
+                    format!(
+                        "key {} bytes exceeds topic limit {} bytes",
+                        m.key_len, handle.cfg.max_key_size_bytes,
+                    ),
+                ),
+                payload: Bytes::new(),
+            };
+        }
+        if m.value_len > handle.cfg.max_value_size_bytes {
+            return Frame {
+                command: make_error(
+                    correlation_id,
+                    ErrorCode::ErrRecordTooLarge,
+                    format!(
+                        "value {} bytes exceeds topic limit {} bytes",
+                        m.value_len, handle.cfg.max_value_size_bytes,
+                    ),
+                ),
+                payload: Bytes::new(),
+            };
+        }
+    }
+
     // Slice payload into per-record (key, value) pairs using the metas.
     let mut records = Vec::with_capacity(records_meta.len());
     let mut cursor = 0usize;
@@ -130,77 +231,6 @@ pub async fn handle_produce(
             payload: Bytes::new(),
         };
     }
-
-    // Auto-create the topic if configured.
-    if state.auto_create {
-        let (r, rr) = oneshot::channel::<Result<(), RegistryError>>();
-        if state
-            .registry
-            .send(RegistryMsg::EnsureExists {
-                name: topic.clone(),
-                partition_count: state.default_partition_count,
-                reply: r,
-            })
-            .await
-            .is_err()
-        {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
-        }
-        match rr.await {
-            Ok(Ok(())) => {
-                // Newly created: spawn partition workers so they are present in
-                // state.partitions before the produce handle-lookup below.
-                let cfg = ResolvedTopicConfig::resolve(
-                    &TopicConfigOverridesModel::default(),
-                    state.disk_type.clone(),
-                );
-                for p in 0..state.default_partition_count {
-                    spawn_partition(
-                        &state.data_dir,
-                        &topic,
-                        p,
-                        cfg.clone(),
-                        state.store.clone(),
-                        state.prefix.clone(),
-                        state.partitions.clone(),
-                    )
-                    .await;
-                }
-            }
-            Ok(Err(RegistryError::AlreadyExists)) => { /* partition workers already running */ }
-            Ok(Err(RegistryError::Io(msg))) => {
-                return Frame {
-                    command: make_error(
-                        correlation_id,
-                        ErrorCode::ErrInternal,
-                        format!("auto-create failed: {msg}"),
-                    ),
-                    payload: Bytes::new(),
-                };
-            }
-            Err(_) => {
-                return Frame {
-                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                    payload: Bytes::new(),
-                };
-            }
-        }
-    }
-
-    // Resolve the partition handle.
-    let handle = {
-        let guard = state.partitions.read().await;
-        guard.get(&(topic.clone(), partition)).cloned()
-    };
-    let Some(handle) = handle else {
-        return Frame {
-            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
-            payload: Bytes::new(),
-        };
-    };
 
     let n = records.len() as i64;
     let (ack, ack_rx) = oneshot::channel::<i64>();

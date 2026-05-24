@@ -279,13 +279,14 @@ pub async fn handle_fetch(
             payload: Bytes::new(),
         };
     };
+    let effective_wait = (req.max_wait_ms as u64).min(handle.cfg.max_fetch_wait_ms);
     let result = fetch(
         FetchRequest {
             topic: req.topic,
             partition: req.partition,
             from_offset: req.from_offset,
             max_records: req.max_records as usize,
-            max_wait_ms: req.max_wait_ms as u64,
+            max_wait_ms: effective_wait,
         },
         &handle.pw_tx,
         &handle.tail,

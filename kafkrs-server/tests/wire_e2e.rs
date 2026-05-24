@@ -407,6 +407,140 @@ async fn oversize_key_returns_err_key_too_large() {
     }
 }
 
+async fn setup_broker_with_max_fetch_wait(
+    dd: &str,
+    max_fetch_wait_ms: u64,
+) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+    put(
+        &store,
+        &manifest_key("", "t", 0),
+        Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let (utx, urx) = mpsc::channel(64);
+    let (dtx, mut drx) = mpsc::channel(64);
+    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, urx, dtx).run());
+    let (pw_tx, pw_rx) = mpsc::channel(256);
+    let (tail, _) = broadcast::channel(1024);
+    let pw_tx_d = pw_tx.clone();
+    tokio::spawn(async move {
+        while let Some(d) = drx.recv().await {
+            let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
+        }
+    });
+    let mut o = TopicConfigOverrides::default();
+    o.group_commit_record_count = Some(1);
+    o.max_fetch_wait_ms = Some(max_fetch_wait_ms);
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+    let pw = PartitionWriter::new(
+        dd.into(),
+        "t".into(),
+        0,
+        cfg,
+        0,
+        vec![],
+        pw_rx,
+        utx,
+        tail.clone(),
+    )
+    .unwrap();
+    tokio::spawn(pw.run());
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    partitions
+        .write()
+        .await
+        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry = TopicRegistry::load(
+        dd.into(),
+        DiskType::Nvme,
+        store.clone(),
+        "".into(),
+        reg_rx,
+    )
+    .unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: false,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    (port, partitions)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetch_max_wait_ms_is_capped() {
+    use tokio::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) =
+        setup_broker_with_max_fetch_wait(dir.path().to_str().unwrap(), 100).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Fetch with max_wait_ms = 5000, but the topic caps it at 100.
+    let fetch = Command {
+        correlation_id: 2,
+        body: Some(Body::Fetch(FetchRequest {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_records: 10,
+            max_wait_ms: 5_000,
+        })),
+    };
+    let start = Instant::now();
+    sock.write_all(&encode(&fetch, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    let elapsed = start.elapsed();
+    assert_eq!(resp.correlation_id, 2);
+    assert!(
+        elapsed.as_millis() < 500,
+        "fetch should be capped at ~100 ms, took {} ms",
+        elapsed.as_millis()
+    );
+    match resp.body {
+        Some(Body::FetchResp(r)) => assert!(r.records.is_empty()),
+        other => panic!("expected FetchResp, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversize_value_returns_err_record_too_large() {
     use kafkrs_models::wire::v1::ErrorCode;

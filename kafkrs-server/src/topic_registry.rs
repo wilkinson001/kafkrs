@@ -27,7 +27,8 @@ pub enum RegistryMsg {
     List {
         reply: oneshot::Sender<Vec<String>>,
     },
-    /// Ensure a topic exists (auto-create). No-op if present.
+    /// Ensure a topic exists (auto-create semantics). Returns `Ok(())` if this
+    /// call created it; `Err(AlreadyExists)` if it already existed.
     EnsureExists {
         name: String,
         partition_count: u32,
@@ -107,7 +108,7 @@ impl TopicRegistry {
                     reply,
                 } => {
                     let r: Result<(), RegistryError> = if self.topics.contains_key(&name) {
-                        Ok(())
+                        Err(RegistryError::AlreadyExists)
                     } else {
                         self.create(&name, partition_count, TopicConfigOverrides::default())
                             .await
@@ -270,6 +271,43 @@ mod tests {
         assert_eq!(
             rr2.await.unwrap().unwrap_err(),
             RegistryError::AlreadyExists
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_exists_returns_already_exists_for_existing_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(8);
+        let reg = TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
+            .unwrap();
+        tokio::spawn(reg.run());
+
+        // First EnsureExists creates the topic.
+        let (r1, rr1) = oneshot::channel();
+        tx.send(RegistryMsg::EnsureExists {
+            name: "foo".into(),
+            partition_count: 1,
+            reply: r1,
+        })
+        .await
+        .unwrap();
+        assert!(rr1.await.unwrap().is_ok());
+
+        // Second EnsureExists for the same topic must return Err(AlreadyExists),
+        // matching Create's semantic. This is what handle_produce's auto-create
+        // branch relies on to avoid re-spawning partition workers.
+        let (r2, rr2) = oneshot::channel();
+        tx.send(RegistryMsg::EnsureExists {
+            name: "foo".into(),
+            partition_count: 1,
+            reply: r2,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            rr2.await.unwrap().unwrap_err(),
+            RegistryError::AlreadyExists,
         );
     }
 

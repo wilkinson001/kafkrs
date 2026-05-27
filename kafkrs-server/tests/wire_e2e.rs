@@ -16,9 +16,88 @@ use kafkrs_server::wire::{accept_loop, PartitionHandle, SharedState};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
+
+async fn setup_broker_no_topics(dd: &str) -> u16 {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: false,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    port
+}
+
+async fn setup_broker_auto_create(dd: &str) -> u16 {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: true,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    port
+}
 
 async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
     let store = build_store(
@@ -74,7 +153,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
     partitions
         .write()
         .await
-        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail });
+        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
 
     // Spin up a topic registry actor (needed for SharedState even if not used by
     // produce/fetch in this test).
@@ -92,6 +171,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         default_partition_count: 1,
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -252,5 +332,507 @@ async fn pre_connect_command_is_rejected() {
             );
         }
         other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_topic_then_produce_succeeds() {
+    use kafkrs_models::wire::v1::{ConnectedResponse, CreateTopicRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let port = setup_broker_no_topics(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // 1. Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "test".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert!(matches!(
+        resp.body,
+        Some(Body::Connected(ConnectedResponse { .. }))
+    ));
+
+    // 2. CreateTopic.
+    let create = Command {
+        correlation_id: 2,
+        body: Some(Body::CreateTopic(CreateTopicRequest {
+            topic: "explicit".into(),
+            partition_count: 1,
+            overrides: None,
+        })),
+    };
+    sock.write_all(&encode(&create, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::CreateTopicResp(_)) => {}
+        other => panic!("expected CreateTopicResp, got {other:?}"),
+    }
+
+    // 3. Produce to the just-created topic. Without Fix 1 this returns ErrUnknownTopic.
+    let produce = Command {
+        correlation_id: 3,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "explicit".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 3);
+    match resp.body {
+        Some(Body::ProduceResp(r)) => {
+            assert_eq!(r.base_offset, 0);
+            assert_eq!(r.last_offset, 0);
+        }
+        other => panic!("expected ProduceResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversize_key_returns_err_key_too_large() {
+    use kafkrs_models::wire::v1::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce a key of 1025 bytes (exceeds the default 1 KiB limit).
+    let key = vec![0u8; 1025];
+    let value = vec![0u8; 1];
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&key);
+    payload.extend_from_slice(&value);
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1025,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, &payload)).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::Error(e)) => assert_eq!(e.code, ErrorCode::ErrKeyTooLarge as i32),
+        other => panic!("expected Error(ErrKeyTooLarge), got {other:?}"),
+    }
+}
+
+async fn setup_broker_with_max_fetch_wait(
+    dd: &str,
+    max_fetch_wait_ms: u64,
+) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+    put(
+        &store,
+        &manifest_key("", "t", 0),
+        Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let (utx, urx) = mpsc::channel(64);
+    let (dtx, mut drx) = mpsc::channel(64);
+    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, urx, dtx).run());
+    let (pw_tx, pw_rx) = mpsc::channel(256);
+    let (tail, _) = broadcast::channel(1024);
+    let pw_tx_d = pw_tx.clone();
+    tokio::spawn(async move {
+        while let Some(d) = drx.recv().await {
+            let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
+        }
+    });
+    let mut o = TopicConfigOverrides::default();
+    o.group_commit_record_count = Some(1);
+    o.max_fetch_wait_ms = Some(max_fetch_wait_ms);
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+    let pw = PartitionWriter::new(
+        dd.into(),
+        "t".into(),
+        0,
+        cfg,
+        0,
+        vec![],
+        pw_rx,
+        utx,
+        tail.clone(),
+    )
+    .unwrap();
+    tokio::spawn(pw.run());
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    partitions
+        .write()
+        .await
+        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: false,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    (port, partitions)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetch_max_wait_ms_is_capped() {
+    use tokio::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) =
+        setup_broker_with_max_fetch_wait(dir.path().to_str().unwrap(), 100).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Fetch with max_wait_ms = 5000, but the topic caps it at 100.
+    let fetch = Command {
+        correlation_id: 2,
+        body: Some(Body::Fetch(FetchRequest {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_records: 10,
+            max_wait_ms: 5_000,
+        })),
+    };
+    let start = Instant::now();
+    sock.write_all(&encode(&fetch, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    let elapsed = start.elapsed();
+    assert_eq!(resp.correlation_id, 2);
+    assert!(
+        elapsed.as_millis() < 500,
+        "fetch should be capped at ~100 ms, took {} ms",
+        elapsed.as_millis()
+    );
+    match resp.body {
+        Some(Body::FetchResp(r)) => assert!(r.records.is_empty()),
+        other => panic!("expected FetchResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversize_value_returns_err_record_too_large() {
+    use kafkrs_models::wire::v1::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce a value of 1 MiB + 1 byte (exceeds the default 1 MiB limit).
+    let value = vec![0u8; (1024 * 1024) + 1];
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&value);
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 0,
+                value_len: (1024 * 1024 + 1) as u32,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, &payload)).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert_eq!(resp.correlation_id, 2);
+    match resp.body {
+        Some(Body::Error(e)) => assert_eq!(e.code, ErrorCode::ErrRecordTooLarge as i32),
+        other => panic!("expected Error(ErrRecordTooLarge), got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn broker_stays_responsive_after_disconnect_midpoll() {
+    use kafkrs_models::wire::v1::PingRequest;
+    use tokio::time::{sleep, Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+
+    // First connection: start a long-poll Fetch, then drop without reading the response.
+    {
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let connect = Command {
+            correlation_id: 1,
+            body: Some(Body::Connect(ConnectRequest {
+                protocol_version: 1,
+                client_id: "first".into(),
+                auth_data: vec![],
+            })),
+        };
+        sock.write_all(&encode(&connect, b"")).await.unwrap();
+        let _ = read_frame(&mut sock).await;
+        let fetch = Command {
+            correlation_id: 2,
+            body: Some(Body::Fetch(FetchRequest {
+                topic: "t".into(),
+                partition: 0,
+                from_offset: 0,
+                max_records: 10,
+                max_wait_ms: 30_000, // long poll
+            })),
+        };
+        sock.write_all(&encode(&fetch, b"")).await.unwrap();
+        // Drop sock without reading the response.
+    }
+
+    // Give the broker a moment to notice the disconnect.
+    sleep(Duration::from_millis(200)).await;
+
+    // Second connection: Connect + Ping should complete quickly.
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "second".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let ping = Command {
+        correlation_id: 2,
+        body: Some(Body::Ping(PingRequest {})),
+    };
+    let start = Instant::now();
+    sock.write_all(&encode(&ping, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    let elapsed = start.elapsed();
+    assert_eq!(resp.correlation_id, 2);
+    assert!(matches!(resp.body, Some(Body::Pong(_))));
+    assert!(
+        elapsed.as_millis() < 1_000,
+        "Ping after disconnect-midpoll should complete quickly, took {} ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_create_existing_topic_does_not_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = setup_broker_auto_create(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // First produce auto-creates "demo" and writes offset 0.
+    let produce1 = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "demo".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce1, b"ab")).await.unwrap();
+    let (resp1, _) = read_frame(&mut sock).await;
+    match resp1.body {
+        Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 0),
+        other => panic!("expected ProduceResp, got {other:?}"),
+    }
+
+    // Second produce to the SAME topic must not re-spawn workers and must
+    // advance the offset to 1.
+    let produce2 = Command {
+        correlation_id: 3,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "demo".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce2, b"cd")).await.unwrap();
+    let (resp2, _) = read_frame(&mut sock).await;
+    match resp2.body {
+        Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 1),
+        other => panic!("expected ProduceResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_create_topic_same_name_one_wins() {
+    use kafkrs_models::wire::v1::{CreateTopicRequest, ErrorCode};
+
+    let dir = tempfile::tempdir().unwrap();
+    let port = setup_broker_no_topics(dir.path().to_str().unwrap()).await;
+
+    // Helper to drive a single CreateTopic and return the resulting Body.
+    async fn create(port: u16) -> Option<Body> {
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let connect = Command {
+            correlation_id: 1,
+            body: Some(Body::Connect(ConnectRequest {
+                protocol_version: 1,
+                client_id: "racer".into(),
+                auth_data: vec![],
+            })),
+        };
+        sock.write_all(&encode(&connect, b"")).await.unwrap();
+        let _ = read_frame(&mut sock).await;
+        let create = Command {
+            correlation_id: 2,
+            body: Some(Body::CreateTopic(CreateTopicRequest {
+                topic: "racey".into(),
+                partition_count: 1,
+                overrides: None,
+            })),
+        };
+        sock.write_all(&encode(&create, b"")).await.unwrap();
+        let (resp, _) = read_frame(&mut sock).await;
+        resp.body
+    }
+
+    // Fire both CreateTopic RPCs concurrently.
+    let (a, b) = tokio::join!(create(port), create(port));
+
+    // Exactly one CreateTopicResp and exactly one Error(ErrTopicAlreadyExists).
+    let codes: Vec<_> = [a, b]
+        .into_iter()
+        .map(|body| match body {
+            Some(Body::CreateTopicResp(_)) => "ok",
+            Some(Body::Error(e)) if e.code == ErrorCode::ErrTopicAlreadyExists as i32 => {
+                "already_exists"
+            }
+            other => panic!("unexpected response body: {other:?}"),
+        })
+        .collect();
+    let mut sorted = codes.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["already_exists", "ok"]);
+
+    // Produce against the topic — confirms no orphaning is externally visible.
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "producer".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "racey".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 0),
+        other => panic!("expected ProduceResp, got {other:?}"),
     }
 }

@@ -8,6 +8,7 @@ pub const DEFAULT_SEGMENT_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MiB
 pub const DEFAULT_SEGMENT_SEAL_TIME_MS: u64 = 60_000; // 60 s
 pub const DEFAULT_MAX_KEY_SIZE_BYTES: u32 = 1024; // 1 KiB
 pub const DEFAULT_MAX_VALUE_SIZE_BYTES: u32 = 1024 * 1024; // 1 MiB
+pub const DEFAULT_MAX_FETCH_WAIT_MS: u64 = 60_000; // 60 s
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct TopicConfigOverrides {
@@ -18,6 +19,7 @@ pub struct TopicConfigOverrides {
     pub group_commit_time_ms: Option<u64>,
     pub group_commit_size_bytes: Option<usize>,
     pub group_commit_record_count: Option<usize>,
+    pub max_fetch_wait_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -47,6 +49,7 @@ pub struct ResolvedTopicConfig {
     pub group_commit_time_ms: u64,
     pub group_commit_size_bytes: usize,
     pub group_commit_record_count: usize,
+    pub max_fetch_wait_ms: u64,
 }
 
 impl ResolvedTopicConfig {
@@ -64,6 +67,7 @@ impl ResolvedTopicConfig {
             group_commit_time_ms: o.group_commit_time_ms.unwrap_or(p.time_ms),
             group_commit_size_bytes: o.group_commit_size_bytes.unwrap_or(p.size_bytes),
             group_commit_record_count: o.group_commit_record_count.unwrap_or(p.record_count),
+            max_fetch_wait_ms: o.max_fetch_wait_ms.unwrap_or(DEFAULT_MAX_FETCH_WAIT_MS),
         }
     }
 }
@@ -82,6 +86,17 @@ mod tests {
         assert_eq!(r.max_value_size_bytes, 1024 * 1024);
         assert_eq!(r.group_commit_time_ms, 5); // nvme profile
         assert_eq!(r.group_commit_record_count, 256);
+        assert_eq!(r.max_fetch_wait_ms, 60_000);
+    }
+
+    #[test]
+    fn max_fetch_wait_ms_override_wins() {
+        let o = TopicConfigOverrides {
+            max_fetch_wait_ms: Some(200),
+            ..Default::default()
+        };
+        let r = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+        assert_eq!(r.max_fetch_wait_ms, 200);
     }
 
     #[test]

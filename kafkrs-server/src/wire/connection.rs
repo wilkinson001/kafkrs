@@ -17,9 +17,12 @@ use crate::wire::frame::{decode_frame_body, encode_frame, Frame, MAX_FRAME_SIZE}
 use bytes::Bytes;
 use kafkrs_models::wire::v1::{command::Body, ErrorCode};
 use log::{debug, error, warn};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
@@ -114,6 +117,10 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
     });
     drop(req_tx); // dispatcher closes req_rx when reader's clone is dropped
 
+    // Per-RPC abort tracking. Inserts happen on spawn; the spawned task removes
+    // its own entry on completion; the post-loop drain aborts whatever's left.
+    let inflight: Arc<Mutex<HashMap<u64, AbortHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+
     // Dispatcher: state machine + per-RPC spawn.
     let mut connected = false;
     while let Some(frame) = req_rx.recv().await {
@@ -171,13 +178,13 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                 let resp_tx = resp_tx.clone();
                 let state = state.clone();
                 let payload = frame.payload.clone();
-                // TODO: abort in-flight per-RPC tasks on connection teardown rather than
-                // relying on resp_tx.send returning Err. A long-poll Fetch can hold a task
-                // alive for up to max_wait_ms after the client disconnects.
-                tokio::spawn(async move {
+                let inflight_task = inflight.clone();
+                let join = tokio::spawn(async move {
                     let response = dispatch_one(cid, body, payload, &state).await;
                     let _ = resp_tx.send(response).await;
+                    inflight_task.lock().unwrap().remove(&cid);
                 });
+                inflight.lock().unwrap().insert(cid, join.abort_handle());
             }
             (true, None) => {
                 let _ = resp_tx
@@ -192,6 +199,11 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                     .await;
             }
         }
+    }
+
+    // Abort any per-RPC tasks still running on disconnect.
+    for (_cid, handle) in inflight.lock().unwrap().drain() {
+        handle.abort();
     }
 
     // Drop resp_tx so the writer's loop completes.

@@ -3,11 +3,12 @@
 use crate::partition_writer::PartitionWriter;
 use crate::recovery::recover_partition;
 use crate::uploader::{Uploader, UploaderMsg};
+use crate::wire::dispatch::PartitionSpawnLocks;
 use crate::wire::PartitionHandle;
 use kafkrs_models::topic::ResolvedTopicConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex, RwLock};
 
 pub async fn spawn_partition(
     data_dir: &str,
@@ -17,7 +18,26 @@ pub async fn spawn_partition(
     store: Arc<dyn object_store::ObjectStore>,
     prefix: String,
     partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>,
+    spawn_locks: PartitionSpawnLocks,
 ) {
+    let key = (topic.to_string(), partition);
+
+    // Acquire (or create) the per-key Tokio mutex. The outer std::sync::Mutex
+    // is held only briefly here for the entry lookup/insert; never across await.
+    let lock = {
+        let mut locks = spawn_locks.lock().unwrap();
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(TokioMutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().await;
+
+    // Already present? Concurrent caller won the race; no-op.
+    if partitions.read().await.contains_key(&key) {
+        return;
+    }
+
     let rec = recover_partition(data_dir, topic, partition, &store, &prefix)
         .await
         .expect("recover partition");
@@ -85,6 +105,6 @@ pub async fn spawn_partition(
     tokio::spawn(pw.run());
     partitions.write().await.insert(
         (topic.to_string(), partition),
-        PartitionHandle { pw_tx, tail },
+        PartitionHandle { pw_tx, tail, cfg },
     );
 }

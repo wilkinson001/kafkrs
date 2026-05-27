@@ -4,6 +4,19 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.3.2] — 2026-05-27
+
+Version bump only — kafkrs-models has no code changes. Stays in lockstep with the broker's 0.3.2 release.
+
+## [0.3.1] — 2026-05-24
+
+Adds `max_fetch_wait_ms` to per-topic config. Additive proto change (field 8 on `TopicConfigOverrides`) — no protocol version bump. See `docs/superpowers/specs/2026-05-24-tier1-fixes-design.md`.
+
+### Added
+- `max_fetch_wait_ms` field on `TopicConfigOverrides` and `ResolvedTopicConfig`. Default 60 000 ms (60 s).
+- `DEFAULT_MAX_FETCH_WAIT_MS` constant.
+- New proto field: `optional uint64 max_fetch_wait_ms = 8` on `TopicConfigOverrides`. First exercise of the wire spec's additive-evolution rule.
+
 ## [0.3.0] — 2026-05-21
 
 Wire protocol v1 lands. See `docs/superpowers/specs/2026-05-20-wire-protocol-design.md` for the design.

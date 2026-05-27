@@ -4,6 +4,41 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.3.2] — 2026-05-27
+
+Two bug fixes uncovered during the post-0.3.1 review. See `docs/superpowers/specs/2026-05-24-spawn-partition-idempotency-design.md`.
+
+### Fixed
+- `TopicRegistry::EnsureExists` now returns `Err(AlreadyExists)` when the topic already exists, matching `Create`'s semantic. Previously it returned `Ok(())`, which caused `handle_produce`'s auto-create branch to re-spawn partition workers on every produce to an existing auto-created topic — orphaning the prior `PartitionWriter` and `Uploader` actors. The actors shut down cleanly (no data loss), but the churn was the steady-state behavior.
+- `spawn_partition` is now idempotent: per-key `tokio::sync::Mutex` guards (stored in `SharedState.spawn_locks`) serialize concurrent callers for the same `(topic, partition)`; the second caller sees the partition handle already in `state.partitions` and no-ops. Belt-and-braces defense against future callers that might race through the registry's serialization.
+
+### Changed
+- `SharedState` gains a `spawn_locks: PartitionSpawnLocks` field (new public type alias in `wire::dispatch` for `Arc<StdMutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>>`). Lock-map entries are never removed in v1 (cleanup deferred to a future `DeleteTopic` implementation).
+- `spawn_partition` signature gains a `spawn_locks` parameter; all three call sites (boot loop, `handle_create_topic`, `handle_produce` auto-create) updated.
+- Clarified the misleading comment in `handle_produce`'s auto-create `Err(AlreadyExists)` arm.
+
+### Added
+- Two integration tests in `tests/wire_e2e.rs`: `auto_create_existing_topic_does_not_respawn` (regression guard for the EnsureExists fix), `concurrent_create_topic_same_name_one_wins` (external smoke for the idempotency fix).
+- Unit test in `topic_registry.rs::tests`: `ensure_exists_returns_already_exists_for_existing_topic`.
+
+## [0.3.1] — 2026-05-24
+
+Four bug fixes from the post-0.3.0 code review. See `docs/superpowers/specs/2026-05-24-tier1-fixes-design.md`.
+
+### Added
+- `PartitionHandle` gains a `cfg: ResolvedTopicConfig` field so per-RPC handlers can read per-topic limits without a registry round-trip.
+- Per-connection `AbortHandle` map keyed by `correlation_id`. In-flight per-RPC tasks are now aborted when the connection closes.
+- New integration tests in `tests/wire_e2e.rs`: `create_topic_then_produce_succeeds`, `oversize_key_returns_err_key_too_large`, `oversize_value_returns_err_record_too_large`, `fetch_max_wait_ms_is_capped`, `broker_stays_responsive_after_disconnect_midpoll`.
+
+### Fixed
+- `handle_create_topic` now spawns partition workers after registry success. Previously an explicit `CreateTopic` followed by `Produce` returned `ERR_UNKNOWN_TOPIC`; the auto-create path was unaffected.
+- `handle_produce` now enforces per-topic `max_key_size_bytes` and `max_value_size_bytes` against each record's declared sizes, returning `ERR_KEY_TOO_LARGE` (204) or `ERR_RECORD_TOO_LARGE` (203) for oversized records.
+- `handle_fetch` now caps `max_wait_ms` at the per-topic `max_fetch_wait_ms`. The cap is silent — the client request is honored up to the limit.
+- Per-RPC tasks are now aborted when their connection is torn down, eliminating the up-to-`max_wait_ms` leak of long-poll fetcher tasks.
+
+### Changed
+- `handle_produce` restructured: partition handle now resolved before payload slicing so the per-record size check can read `handle.cfg`.
+
 ## [0.3.0] — 2026-05-21
 
 Wire protocol v1 lands. See `docs/superpowers/specs/2026-05-20-wire-protocol-design.md` for the design.

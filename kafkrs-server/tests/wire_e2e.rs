@@ -16,6 +16,7 @@ use kafkrs_server::wire::{accept_loop, PartitionHandle, SharedState};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -50,6 +51,7 @@ async fn setup_broker_no_topics(dd: &str) -> u16 {
         default_partition_count: 1,
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -130,6 +132,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         default_partition_count: 1,
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -480,6 +483,7 @@ async fn setup_broker_with_max_fetch_wait(
         default_partition_count: 1,
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -2,6 +2,7 @@ use clap::Parser;
 use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::RwLock;
@@ -10,6 +11,7 @@ use kafkrs_server::config;
 use kafkrs_server::object_store::build_store;
 use kafkrs_server::startup::spawn_partition;
 use kafkrs_server::topic_registry::{RegistryMsg, TopicRegistry};
+use kafkrs_server::wire::dispatch::PartitionSpawnLocks;
 use kafkrs_server::wire::{accept_loop, PartitionHandle, SharedState};
 
 #[derive(Parser)]
@@ -47,6 +49,8 @@ async fn main() {
     let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
+    let spawn_locks: PartitionSpawnLocks = Arc::new(StdMutex::new(HashMap::new()));
+
     // Bring up each known partition independently (spec risk: startup must not
     // serialize on the slowest manifest GET — each task is independent).
     for (topic, pcount, rtc) in known {
@@ -59,6 +63,7 @@ async fn main() {
                 store.clone(),
                 prefix.clone(),
                 partitions.clone(),
+                spawn_locks.clone(),
             )
             .await;
         }
@@ -75,6 +80,7 @@ async fn main() {
         default_partition_count: cfg.broker.default_partition_count,
         data_dir: cfg.data_dir.clone(),
         disk_type: cfg.broker.disk_type.clone(),
+        spawn_locks: spawn_locks.clone(),
     };
 
     for port in cfg.ports.clone() {

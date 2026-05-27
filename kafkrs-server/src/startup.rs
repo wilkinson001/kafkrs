@@ -3,6 +3,7 @@
 use crate::partition_writer::PartitionWriter;
 use crate::recovery::recover_partition;
 use crate::uploader::{Uploader, UploaderMsg};
+use crate::wire::dispatch::PartitionSpawnLocks;
 use crate::wire::PartitionHandle;
 use kafkrs_models::topic::ResolvedTopicConfig;
 use std::collections::HashMap;
@@ -17,7 +18,9 @@ pub async fn spawn_partition(
     store: Arc<dyn object_store::ObjectStore>,
     prefix: String,
     partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>,
+    spawn_locks: PartitionSpawnLocks,
 ) {
+    let _ = &spawn_locks; // unused in Task 2; Task 3 adds the idempotency guard.
     let rec = recover_partition(data_dir, topic, partition, &store, &prefix)
         .await
         .expect("recover partition");

@@ -21,7 +21,15 @@ use kafkrs_models::wire::v1::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use std::sync::Mutex as StdMutex;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex as TokioMutex, RwLock};
+
+/// Per-(topic, partition) locks coordinating concurrent `spawn_partition`
+/// calls. Outer std::sync::Mutex guards the map (held briefly for entry
+/// lookup/insert, never across await); per-key tokio::sync::Mutex is held
+/// across the full spawn body (which awaits on recovery and channel setup).
+pub type PartitionSpawnLocks =
+    Arc<StdMutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>>;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const BROKER_ID: &str = "kafkrs-broker-v1";
@@ -48,6 +56,7 @@ pub struct SharedState {
     /// Needed by the auto-create path to spawn partition workers.
     pub data_dir: String,
     pub disk_type: DiskType,
+    pub spawn_locks: PartitionSpawnLocks,
 }
 
 // ---- Per-RPC handlers ----
@@ -129,6 +138,7 @@ pub async fn handle_produce(
                         state.store.clone(),
                         state.prefix.clone(),
                         state.partitions.clone(),
+                        state.spawn_locks.clone(),
                     )
                     .await;
                 }
@@ -368,6 +378,7 @@ pub async fn handle_create_topic(
                     state.store.clone(),
                     state.prefix.clone(),
                     state.partitions.clone(),
+                    state.spawn_locks.clone(),
                 )
                 .await;
             }

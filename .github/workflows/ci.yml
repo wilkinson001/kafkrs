@@ -47,9 +47,12 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
       - name: buf lint
         run: buf lint
-      - name: buf breaking (vs master)
+      - name: buf breaking (vs origin/master)
         if: github.event_name == 'pull_request'
-        run: buf breaking --against ".git#branch=master"
+        # actions/checkout populates refs/remotes/origin/master but not
+        # refs/heads/master on a PR checkout, so reference the remote-tracking
+        # ref directly rather than buf's branch= shorthand.
+        run: buf breaking --against ".git#ref=refs/remotes/origin/master"
 
   python-test:
     name: Python e2e

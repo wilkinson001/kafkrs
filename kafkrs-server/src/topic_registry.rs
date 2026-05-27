@@ -27,7 +27,8 @@ pub enum RegistryMsg {
     List {
         reply: oneshot::Sender<Vec<String>>,
     },
-    /// Ensure a topic exists (auto-create). No-op if present.
+    /// Ensure a topic exists (auto-create semantics). Returns `Ok(())` if this
+    /// call created it; `Err(AlreadyExists)` if it already existed.
     EnsureExists {
         name: String,
         partition_count: u32,

@@ -28,8 +28,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex as TokioMutex, RwLock};
 /// calls. Outer std::sync::Mutex guards the map (held briefly for entry
 /// lookup/insert, never across await); per-key tokio::sync::Mutex is held
 /// across the full spawn body (which awaits on recovery and channel setup).
-pub type PartitionSpawnLocks =
-    Arc<StdMutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>>;
+pub type PartitionSpawnLocks = Arc<StdMutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>>;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const BROKER_ID: &str = "kafkrs-broker-v1";
@@ -143,7 +142,10 @@ pub async fn handle_produce(
                     .await;
                 }
             }
-            Ok(Err(RegistryError::AlreadyExists)) => { /* partition workers already running */ }
+            Ok(Err(RegistryError::AlreadyExists)) => {
+                // Topic existed before this produce, so its partition workers were
+                // spawned by a prior CreateTopic or EnsureExists call. Nothing to do.
+            }
             Ok(Err(RegistryError::Io(msg))) => {
                 return Frame {
                     command: make_error(

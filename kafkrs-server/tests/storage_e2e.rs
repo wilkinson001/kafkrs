@@ -1,11 +1,10 @@
 use bytes::Bytes;
 use kafkrs_models::config::{DiskType, ObjectStoreConfig};
 use kafkrs_models::manifest::Manifest;
-use kafkrs_models::record::Record;
 use kafkrs_models::topic::{ResolvedTopicConfig, TopicConfigOverrides};
 use kafkrs_server::object_store::{build_store, manifest_key, put};
 use kafkrs_server::partition_writer::{IncomingRecord, PartitionWriter, PwMsg};
-use kafkrs_server::uploader::{Uploader, UploaderMsg};
+use kafkrs_server::uploader::Uploader;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Sender<i64>) {
@@ -41,9 +40,11 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
         }
     });
 
-    let mut o = TopicConfigOverrides::default();
-    o.segment_size_bytes = Some(seal_bytes);
-    o.group_commit_record_count = Some(1);
+    let o = TopicConfigOverrides {
+        segment_size_bytes: Some(seal_bytes),
+        group_commit_record_count: Some(1),
+        ..Default::default()
+    };
     let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),

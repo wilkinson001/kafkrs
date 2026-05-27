@@ -131,8 +131,10 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
             let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
         }
     });
-    let mut o = TopicConfigOverrides::default();
-    o.group_commit_record_count = Some(1);
+    let o = TopicConfigOverrides {
+        group_commit_record_count: Some(1),
+        ..Default::default()
+    };
     let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),
@@ -483,9 +485,11 @@ async fn setup_broker_with_max_fetch_wait(
             let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
         }
     });
-    let mut o = TopicConfigOverrides::default();
-    o.group_commit_record_count = Some(1);
-    o.max_fetch_wait_ms = Some(max_fetch_wait_ms);
+    let o = TopicConfigOverrides {
+        group_commit_record_count: Some(1),
+        max_fetch_wait_ms: Some(max_fetch_wait_ms),
+        ..Default::default()
+    };
     let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),

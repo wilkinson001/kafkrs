@@ -70,6 +70,7 @@ pub struct PartitionWriter {
 }
 
 impl PartitionWriter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: String,
         topic: String,
@@ -303,9 +304,11 @@ mod tests {
 
     fn small_cfg() -> ResolvedTopicConfig {
         // seal after a tiny number of bytes so tests exercise sealing
-        let mut o = TopicConfigOverrides::default();
-        o.segment_size_bytes = Some(8);
-        o.group_commit_record_count = Some(1);
+        let o = TopicConfigOverrides {
+            segment_size_bytes: Some(8),
+            group_commit_record_count: Some(1),
+            ..Default::default()
+        };
         ResolvedTopicConfig::resolve(&o, DiskType::Nvme)
     }
 

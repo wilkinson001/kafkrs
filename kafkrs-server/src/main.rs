@@ -59,7 +59,7 @@ async fn main() {
                 &cfg.data_dir,
                 &topic,
                 p,
-                rtc.clone(),
+                rtc,
                 store.clone(),
                 prefix.clone(),
                 partitions.clone(),

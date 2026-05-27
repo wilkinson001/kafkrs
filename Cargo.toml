@@ -1,6 +1,7 @@
 [workspace]
 
 members = ["kafkrs-models", "kafkrs-server"]
+resolver = "2"
 
 [workspace.metadata.precommit]
 fmt = "cargo fmt"

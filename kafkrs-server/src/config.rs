@@ -10,7 +10,7 @@ pub fn load_config(file_path: String) -> Config {
         Ok(file) => file,
         Err(error) => panic!("File not found {:?}", error.source()),
     };
-    let str_contents: &str = &*contents;
+    let str_contents: &str = &contents;
     let config: Config = match toml::from_str(str_contents) {
         Ok(conf) => conf,
         Err(error) => panic!("Config file is not valid: {:?}", error.message()),

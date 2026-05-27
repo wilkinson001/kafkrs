@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex, RwLock};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_partition(
     data_dir: &str,
     topic: &str,

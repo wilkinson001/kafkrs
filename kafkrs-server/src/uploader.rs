@@ -7,7 +7,7 @@ use kafkrs_models::record::Record;
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// A sealed batch handed from the PartitionWriter to the Uploader.
 pub struct SealedBatch {

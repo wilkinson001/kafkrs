@@ -60,6 +60,51 @@ async fn setup_broker_no_topics(dd: &str) -> u16 {
     port
 }
 
+async fn setup_broker_auto_create(dd: &str) -> u16 {
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry = TopicRegistry::load(
+        dd.into(),
+        DiskType::Nvme,
+        store.clone(),
+        "".into(),
+        reg_rx,
+    )
+    .unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: true,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    port
+}
+
 async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
     let store = build_store(
         &ObjectStoreConfig {
@@ -649,4 +694,66 @@ async fn broker_stays_responsive_after_disconnect_midpoll() {
         "Ping after disconnect-midpoll should complete quickly, took {} ms",
         elapsed.as_millis()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_create_existing_topic_does_not_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = setup_broker_auto_create(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // First produce auto-creates "demo" and writes offset 0.
+    let produce1 = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "demo".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce1, b"ab")).await.unwrap();
+    let (resp1, _) = read_frame(&mut sock).await;
+    match resp1.body {
+        Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 0),
+        other => panic!("expected ProduceResp, got {other:?}"),
+    }
+
+    // Second produce to the SAME topic must not re-spawn workers and must
+    // advance the offset to 1.
+    let produce2 = Command {
+        correlation_id: 3,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "demo".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce2, b"cd")).await.unwrap();
+    let (resp2, _) = read_frame(&mut sock).await;
+    match resp2.body {
+        Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 1),
+        other => panic!("expected ProduceResp, got {other:?}"),
+    }
 }

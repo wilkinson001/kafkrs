@@ -479,6 +479,8 @@ fn wire_overrides_to_model(w: TopicConfigOverrides) -> TopicConfigOverridesModel
         group_commit_size_bytes: w.group_commit_size_bytes.map(|v| v as usize),
         group_commit_record_count: w.group_commit_record_count.map(|v| v as usize),
         max_fetch_wait_ms: w.max_fetch_wait_ms,
+        retention_ms: w.retention_ms,
+        retention_bytes: w.retention_bytes,
     }
 }
 
@@ -493,5 +495,7 @@ fn model_overrides_to_wire(m: TopicConfigOverridesModel) -> TopicConfigOverrides
         group_commit_size_bytes: m.group_commit_size_bytes.map(|v| v as u64),
         group_commit_record_count: m.group_commit_record_count.map(|v| v as u32),
         max_fetch_wait_ms: m.max_fetch_wait_ms,
+        retention_ms: m.retention_ms,
+        retention_bytes: m.retention_bytes,
     }
 }

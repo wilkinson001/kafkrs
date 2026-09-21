@@ -144,7 +144,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         0,
         vec![],
         pw_rx,
-        utx,
+        utx.clone(),
         tail.clone(),
     )
     .unwrap();
@@ -152,10 +152,15 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
 
     let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    partitions
-        .write()
-        .await
-        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
+    partitions.write().await.insert(
+        ("t".into(), 0),
+        PartitionHandle {
+            pw_tx,
+            tail,
+            cfg,
+            uploader_tx: utx,
+        },
+    );
 
     // Spin up a topic registry actor (needed for SharedState even if not used by
     // produce/fetch in this test).
@@ -499,7 +504,7 @@ async fn setup_broker_with_max_fetch_wait(
         0,
         vec![],
         pw_rx,
-        utx,
+        utx.clone(),
         tail.clone(),
     )
     .unwrap();
@@ -507,10 +512,15 @@ async fn setup_broker_with_max_fetch_wait(
 
     let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    partitions
-        .write()
-        .await
-        .insert(("t".into(), 0), PartitionHandle { pw_tx, tail, cfg });
+    partitions.write().await.insert(
+        ("t".into(), 0),
+        PartitionHandle {
+            pw_tx,
+            tail,
+            cfg,
+            uploader_tx: utx,
+        },
+    );
 
     let (reg_tx, reg_rx) = mpsc::channel(8);
     let registry =

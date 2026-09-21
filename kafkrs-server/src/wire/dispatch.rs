@@ -34,13 +34,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const BROKER_ID: &str = "kafkrs-broker-v1";
 
 /// Handle to a partition's actor: an mpsc sender for the PartitionWriter,
-/// a broadcast sender for tail subscribers, and the resolved per-topic config
-/// (used by handlers to enforce per-topic limits without a registry round-trip).
+/// a broadcast sender for tail subscribers, the resolved per-topic config
+/// (for wire-layer limit enforcement), and an mpsc sender for the Uploader
+/// (used by the RetentionSweeper to enqueue kicks).
 #[derive(Clone)]
 pub struct PartitionHandle {
     pub pw_tx: mpsc::Sender<PwMsg>,
     pub tail: broadcast::Sender<i64>,
     pub cfg: ResolvedTopicConfig,
+    pub uploader_tx: mpsc::Sender<crate::uploader::UploaderMsg>,
 }
 
 /// Shared state available to every per-connection task.

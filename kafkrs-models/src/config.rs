@@ -18,6 +18,8 @@ pub struct BrokerConfig {
     pub auto_create_topics: bool,
     #[serde(default = "default_partition_count")]
     pub default_partition_count: u32,
+    #[serde(default)]
+    pub retention_sweep_interval_ms: Option<u64>,
 }
 
 impl Default for BrokerConfig {
@@ -26,6 +28,7 @@ impl Default for BrokerConfig {
             disk_type: DiskType::default(),
             auto_create_topics: false,
             default_partition_count: default_partition_count(),
+            retention_sweep_interval_ms: None,
         }
     }
 }
@@ -148,6 +151,23 @@ bucket = "b"
         assert!(!cfg.broker.auto_create_topics);
         assert_eq!(cfg.broker.default_partition_count, 1);
         assert_eq!(cfg.broker.disk_type, DiskType::Nvme);
+        assert_eq!(cfg.broker.retention_sweep_interval_ms, None);
         assert_eq!(cfg.object_store.region, "us-east-1");
+    }
+
+    #[test]
+    fn retention_sweep_interval_ms_parses_when_set() {
+        let toml = r#"
+address = "127.0.0.1"
+ports = [5432]
+data_dir = "./data"
+[broker]
+retention_sweep_interval_ms = 30000
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.broker.retention_sweep_interval_ms, Some(30_000));
     }
 }

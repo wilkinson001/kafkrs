@@ -74,6 +74,11 @@ pub async fn get_range(
     Ok(store.get_range(key, range).await?)
 }
 
+pub async fn delete(store: &Arc<dyn ObjectStore>, key: &ObjPath) -> Result<()> {
+    store.delete(key).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +120,26 @@ mod tests {
         assert_eq!(&got[..], b"hello");
         let r = get_range(&store, &key, 1..3).await.unwrap();
         assert_eq!(&r[..], b"el");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_object_and_get_fails_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = build_store(
+            &ObjectStoreConfig {
+                backend: "filesystem".into(),
+                bucket: "b".into(),
+                prefix: "".into(),
+                endpoint: "".into(),
+                region: "us-east-1".into(),
+            },
+            dir.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let key = segment_key("", "t", 0, 42);
+        put(&store, &key, Bytes::from_static(b"hi")).await.unwrap();
+        assert_eq!(get(&store, &key).await.unwrap(), Bytes::from_static(b"hi"));
+        delete(&store, &key).await.unwrap();
+        assert!(get(&store, &key).await.is_err());
     }
 }

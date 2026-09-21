@@ -27,9 +27,16 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
     .await
     .unwrap();
 
+    let o = TopicConfigOverrides {
+        segment_size_bytes: Some(seal_bytes),
+        group_commit_record_count: Some(1),
+        ..Default::default()
+    };
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+
     let (utx, urx) = mpsc::channel(64);
     let (dtx, mut drx) = mpsc::channel(64);
-    tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, urx, dtx).run());
+    tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, cfg, urx, dtx).run());
 
     let (pw_tx, pw_rx) = mpsc::channel(256);
     let (tail, _) = broadcast::channel(1024);
@@ -39,13 +46,6 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
             let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
         }
     });
-
-    let o = TopicConfigOverrides {
-        segment_size_bytes: Some(seal_bytes),
-        group_commit_record_count: Some(1),
-        ..Default::default()
-    };
-    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),
         "t".into(),

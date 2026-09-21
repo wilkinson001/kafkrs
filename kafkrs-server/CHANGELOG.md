@@ -4,6 +4,31 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.4.0] — 2026-09-21
+
+Retention support: time-based and size-based deletion of uploaded Parquet segments, per-topic. See `docs/superpowers/specs/2026-09-21-retention-design.md`.
+
+**Behaviour change:** with default configuration, segments older than 7 days are now automatically deleted from the object store. Operators upgrading from 0.3.x should review per-topic retention settings.
+
+### Added
+- `retention` module with pure `evaluate_eviction(&Manifest, &ResolvedTopicConfig, i64) -> Vec<SegmentEntry>` function.
+- `retention_sweeper` module with the broker-wide `RetentionSweeper` actor. Ticks on `broker.retention_sweep_interval_ms` (default 60s) and enqueues `UploaderMsg::RetentionKick` to every partition's Uploader so idle partitions still evict.
+- `UploaderMsg::RetentionKick` variant.
+- `object_store::delete` helper.
+- `Uploader::retention_pass()` method invoked at end of every successful Upload and on RetentionKick. Rewrites manifest first, then DELETEs segment objects.
+- `PartitionHandle.uploader_tx` field so the sweeper can enqueue kicks.
+- Integration test in `tests/wire_e2e.rs`: `retention_evicts_old_segments_via_sweeper`.
+- Two Uploader-level tests: `upload_then_retention_evicts_expired`, `retention_kick_evicts_without_upload`.
+- Six unit tests in `retention::tests` covering time-based, size-based, either-dimension, tail-never-evicted, and single-segment cases.
+
+### Changed
+- `Uploader::new` signature gains `cfg: ResolvedTopicConfig` as the 5th parameter (immediately after `partition`).
+- `spawn_partition` clones `utx` before moving it into `PartitionWriter::new` so a clone can be stashed in `PartitionHandle`.
+
+### Not implemented
+- Object-store orphan reclamation on partial deletion failure (accepted v1 limitation; documented in the spec).
+- Compaction (Kafka's `cleanup.policy=compact`); separate concern for a future spec.
+
 ## [0.3.2] — 2026-05-27
 
 Two bug fixes uncovered during the post-0.3.1 review. See `docs/superpowers/specs/2026-05-24-spawn-partition-idempotency-design.md`.

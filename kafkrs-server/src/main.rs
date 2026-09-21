@@ -6,9 +6,11 @@ use std::sync::Mutex as StdMutex;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::RwLock;
+use tokio::time::Duration;
 
 use kafkrs_server::config;
 use kafkrs_server::object_store::build_store;
+use kafkrs_server::retention_sweeper::RetentionSweeper;
 use kafkrs_server::startup::spawn_partition;
 use kafkrs_server::topic_registry::{RegistryMsg, TopicRegistry};
 use kafkrs_server::wire::dispatch::PartitionSpawnLocks;
@@ -82,6 +84,10 @@ async fn main() {
         disk_type: cfg.broker.disk_type.clone(),
         spawn_locks: spawn_locks.clone(),
     };
+
+    let sweep_interval =
+        Duration::from_millis(cfg.broker.retention_sweep_interval_ms.unwrap_or(60_000));
+    tokio::spawn(RetentionSweeper::new(partitions.clone(), sweep_interval).run());
 
     for port in cfg.ports.clone() {
         let addr: String = format!("{}:{}", cfg.address, port);

@@ -3,6 +3,8 @@ pub mod fetcher;
 pub mod object_store;
 pub mod partition_writer;
 pub mod recovery;
+pub mod retention;
+pub mod retention_sweeper;
 pub mod segment;
 pub mod startup;
 pub mod topic_registry;

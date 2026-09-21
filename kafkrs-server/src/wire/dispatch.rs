@@ -34,13 +34,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const BROKER_ID: &str = "kafkrs-broker-v1";
 
 /// Handle to a partition's actor: an mpsc sender for the PartitionWriter,
-/// a broadcast sender for tail subscribers, and the resolved per-topic config
-/// (used by handlers to enforce per-topic limits without a registry round-trip).
+/// a broadcast sender for tail subscribers, the resolved per-topic config
+/// (for wire-layer limit enforcement), and an mpsc sender for the Uploader
+/// (used by the RetentionSweeper to enqueue kicks).
 #[derive(Clone)]
 pub struct PartitionHandle {
     pub pw_tx: mpsc::Sender<PwMsg>,
     pub tail: broadcast::Sender<i64>,
     pub cfg: ResolvedTopicConfig,
+    pub uploader_tx: mpsc::Sender<crate::uploader::UploaderMsg>,
 }
 
 /// Shared state available to every per-connection task.
@@ -479,6 +481,8 @@ fn wire_overrides_to_model(w: TopicConfigOverrides) -> TopicConfigOverridesModel
         group_commit_size_bytes: w.group_commit_size_bytes.map(|v| v as usize),
         group_commit_record_count: w.group_commit_record_count.map(|v| v as usize),
         max_fetch_wait_ms: w.max_fetch_wait_ms,
+        retention_ms: w.retention_ms,
+        retention_bytes: w.retention_bytes,
     }
 }
 
@@ -493,5 +497,7 @@ fn model_overrides_to_wire(m: TopicConfigOverridesModel) -> TopicConfigOverrides
         group_commit_size_bytes: m.group_commit_size_bytes.map(|v| v as u64),
         group_commit_record_count: m.group_commit_record_count.map(|v| v as u32),
         max_fetch_wait_ms: m.max_fetch_wait_ms,
+        retention_ms: m.retention_ms,
+        retention_bytes: m.retention_bytes,
     }
 }

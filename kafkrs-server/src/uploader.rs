@@ -4,6 +4,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use kafkrs_models::manifest::{Manifest, SegmentEntry};
 use kafkrs_models::record::Record;
+use kafkrs_models::topic::ResolvedTopicConfig;
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub struct SealedBatch {
 
 pub enum UploaderMsg {
     Upload(SealedBatch),
+    RetentionKick,
 }
 
 /// Notification sent back when a segment is durable in the object store
@@ -35,16 +37,19 @@ pub struct Uploader {
     prefix: String,
     topic: String,
     partition: u32,
+    cfg: ResolvedTopicConfig,
     rx: mpsc::Receiver<UploaderMsg>,
     durable_tx: mpsc::Sender<SegmentDurable>,
 }
 
 impl Uploader {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<dyn ObjectStore>,
         prefix: String,
         topic: String,
         partition: u32,
+        cfg: ResolvedTopicConfig,
         rx: mpsc::Receiver<UploaderMsg>,
         durable_tx: mpsc::Sender<SegmentDurable>,
     ) -> Uploader {
@@ -53,32 +58,47 @@ impl Uploader {
             prefix,
             topic,
             partition,
+            cfg,
             rx,
             durable_tx,
         }
     }
 
     pub async fn run(mut self) {
-        while let Some(UploaderMsg::Upload(batch)) = self.rx.recv().await {
-            // Retry indefinitely: WAL retains the data (spec risk note).
-            loop {
-                match self.upload_once(&batch).await {
-                    Ok(()) => break,
-                    Err(e) => {
-                        log::error!(
-                            "upload failed for base_offset={}: {e:?}; retrying",
+        while let Some(msg) = self.rx.recv().await {
+            match msg {
+                UploaderMsg::Upload(batch) => {
+                    loop {
+                        match self.upload_once(&batch).await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                log::error!(
+                                    "upload failed for base_offset={}: {e:?}; retrying",
+                                    batch.base_offset
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                        }
+                    }
+                    let _ = self
+                        .durable_tx
+                        .send(SegmentDurable {
+                            base_offset: batch.base_offset,
+                        })
+                        .await;
+                    if let Err(e) = self.retention_pass().await {
+                        log::warn!(
+                            "retention_pass after upload failed for base_offset={}: {e:?}",
                             batch.base_offset
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+                UploaderMsg::RetentionKick => {
+                    if let Err(e) = self.retention_pass().await {
+                        log::warn!("retention_pass on kick failed: {e:?}");
                     }
                 }
             }
-            let _ = self
-                .durable_tx
-                .send(SegmentDurable {
-                    base_offset: batch.base_offset,
-                })
-                .await;
         }
     }
 
@@ -114,6 +134,47 @@ impl Uploader {
         }
         Ok(())
     }
+
+    async fn retention_pass(&self) -> Result<()> {
+        use crate::object_store::delete;
+        use crate::retention::evaluate_eviction;
+
+        let m_key: ObjPath = manifest_key(&self.prefix, &self.topic, self.partition);
+        let raw: Bytes = get(&self.store, &m_key).await?;
+        let mut manifest: Manifest = serde_json::from_slice(&raw)?;
+
+        let now_ns: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let evict = evaluate_eviction(&manifest, &self.cfg, now_ns);
+        if evict.is_empty() {
+            return Ok(());
+        }
+
+        let evict_keys: Vec<String> = evict.iter().map(|s| s.object_key.clone()).collect();
+        manifest
+            .segments
+            .retain(|s| !evict_keys.iter().any(|k| k == &s.object_key));
+
+        // Rewrite manifest FIRST so no fetch can reference a deleted segment.
+        let body: Vec<u8> = serde_json::to_vec(&manifest)?;
+        put(&self.store, &m_key, Bytes::from(body)).await?;
+
+        // Then delete the segment objects. Orphans on partial failure are
+        // accepted (spec §"Manifest-first ordering, orphans accepted").
+        for seg in &evict {
+            let seg_key: ObjPath =
+                segment_key(&self.prefix, &self.topic, self.partition, seg.base_offset);
+            if let Err(e) = delete(&self.store, &seg_key).await {
+                log::warn!(
+                    "delete failed for segment base_offset={}: {e:?}; orphan accepted",
+                    seg.base_offset
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -121,6 +182,7 @@ mod tests {
     use super::*;
     use crate::object_store::build_store;
     use kafkrs_models::config::ObjectStoreConfig;
+    use kafkrs_models::manifest::SegmentEntry;
 
     fn fs_cfg() -> ObjectStoreConfig {
         ObjectStoreConfig {
@@ -142,6 +204,22 @@ mod tests {
         }
     }
 
+    fn default_cfg() -> ResolvedTopicConfig {
+        use kafkrs_models::config::DiskType;
+        use kafkrs_models::topic::TopicConfigOverrides;
+        ResolvedTopicConfig::resolve(&TopicConfigOverrides::default(), DiskType::Nvme)
+    }
+
+    fn cfg_with_retention_ms(ms: i64) -> ResolvedTopicConfig {
+        use kafkrs_models::config::DiskType;
+        use kafkrs_models::topic::TopicConfigOverrides;
+        let o = TopicConfigOverrides {
+            retention_ms: Some(ms),
+            ..Default::default()
+        };
+        ResolvedTopicConfig::resolve(&o, DiskType::Nvme)
+    }
+
     #[tokio::test]
     async fn upload_writes_segment_and_appends_manifest() {
         let dir = tempfile::tempdir().unwrap();
@@ -157,7 +235,15 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(4);
         let (dtx, mut drx) = mpsc::channel(4);
-        let up = Uploader::new(store.clone(), "".into(), "t".into(), 0, rx, dtx);
+        let up = Uploader::new(
+            store.clone(),
+            "".into(),
+            "t".into(),
+            0,
+            default_cfg(),
+            rx,
+            dtx,
+        );
         let h = tokio::spawn(up.run());
 
         tx.send(UploaderMsg::Upload(SealedBatch {
@@ -195,7 +281,18 @@ mod tests {
         .unwrap();
         let (tx, rx) = mpsc::channel(4);
         let (dtx, mut drx) = mpsc::channel(4);
-        tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, rx, dtx).run());
+        tokio::spawn(
+            Uploader::new(
+                store.clone(),
+                "".into(),
+                "t".into(),
+                0,
+                default_cfg(),
+                rx,
+                dtx,
+            )
+            .run(),
+        );
         let batch = || SealedBatch {
             records: vec![rec(0)],
             base_offset: 0,
@@ -214,5 +311,138 @@ mod tests {
             1,
             "duplicate base_offset must not double-append"
         );
+    }
+
+    #[tokio::test]
+    async fn upload_then_retention_evicts_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = build_store(&fs_cfg(), dir.path().to_str().unwrap()).unwrap();
+
+        // Pre-populate manifest with an old segment (timestamp near epoch)
+        // and pre-populate its Parquet object.
+        let old_seg = SegmentEntry {
+            base_offset: 0,
+            last_offset: 9,
+            base_timestamp_ns: 0,
+            last_timestamp_ns: 1_000_000,
+            record_count: 10,
+            byte_size: 42,
+            object_key: "segment-00000000000000000000.parquet".into(),
+        };
+        let old_key = segment_key("", "t", 0, 0);
+        put(&store, &old_key, Bytes::from_static(b"placeholder"))
+            .await
+            .unwrap();
+
+        let mut m = Manifest::empty("t", 0);
+        m.segments.push(old_seg);
+        put(
+            &store,
+            &manifest_key("", "t", 0),
+            Bytes::from(serde_json::to_vec(&m).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        // retention_ms = 1000 (1 second) so old segment is old enough to evict.
+        let (tx, rx) = mpsc::channel(4);
+        let (dtx, mut drx) = mpsc::channel(4);
+        let up = Uploader::new(
+            store.clone(),
+            "".into(),
+            "t".into(),
+            0,
+            cfg_with_retention_ms(1_000),
+            rx,
+            dtx,
+        );
+        tokio::spawn(up.run());
+
+        // Send a fresh upload so the new segment becomes the tail; retention
+        // then runs against the manifest.
+        tx.send(UploaderMsg::Upload(SealedBatch {
+            records: vec![rec(10)],
+            base_offset: 10,
+            last_offset: 10,
+            base_timestamp_ns: 999_000_000_000_000_000,
+            last_timestamp_ns: 999_000_000_000_000_000,
+        }))
+        .await
+        .unwrap();
+        drx.recv().await.unwrap();
+
+        // Give post-upload retention_pass a moment to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let raw = get(&store, &manifest_key("", "t", 0)).await.unwrap();
+        let m: Manifest = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(m.segments.len(), 1, "old segment should have been evicted");
+        assert_eq!(m.segments[0].base_offset, 10);
+        assert!(
+            get(&store, &old_key).await.is_err(),
+            "old segment object should be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_kick_evicts_without_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = build_store(&fs_cfg(), dir.path().to_str().unwrap()).unwrap();
+
+        let old_seg = SegmentEntry {
+            base_offset: 0,
+            last_offset: 9,
+            base_timestamp_ns: 0,
+            last_timestamp_ns: 1_000_000,
+            record_count: 10,
+            byte_size: 42,
+            object_key: "segment-00000000000000000000.parquet".into(),
+        };
+        let tail_seg = SegmentEntry {
+            base_offset: 10,
+            last_offset: 19,
+            base_timestamp_ns: 999_000_000_000_000_000,
+            last_timestamp_ns: 999_000_000_000_000_000,
+            record_count: 10,
+            byte_size: 42,
+            object_key: "segment-00000000000000000010.parquet".into(),
+        };
+        let old_key = segment_key("", "t", 0, 0);
+        put(&store, &old_key, Bytes::from_static(b"placeholder"))
+            .await
+            .unwrap();
+
+        let mut m = Manifest::empty("t", 0);
+        m.segments.push(old_seg);
+        m.segments.push(tail_seg);
+        put(
+            &store,
+            &manifest_key("", "t", 0),
+            Bytes::from(serde_json::to_vec(&m).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let (tx, rx) = mpsc::channel(4);
+        let (dtx, _drx) = mpsc::channel(4);
+        let up = Uploader::new(
+            store.clone(),
+            "".into(),
+            "t".into(),
+            0,
+            cfg_with_retention_ms(1_000),
+            rx,
+            dtx,
+        );
+        tokio::spawn(up.run());
+
+        tx.send(UploaderMsg::RetentionKick).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let raw = get(&store, &manifest_key("", "t", 0)).await.unwrap();
+        let m: Manifest = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(m.segments.len(), 1);
+        assert_eq!(m.segments[0].base_offset, 10);
+        assert!(get(&store, &old_key).await.is_err());
     }
 }

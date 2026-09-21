@@ -55,6 +55,7 @@ pub async fn spawn_partition(
             prefix.clone(),
             topic.to_string(),
             partition,
+            cfg,
             urx,
             dtx,
         )
@@ -89,7 +90,7 @@ pub async fn spawn_partition(
         rec.next_offset,
         rec.active_records,
         pw_rx,
-        utx,
+        utx.clone(),
         tail.clone(),
     )
     .expect("partition writer");
@@ -106,6 +107,11 @@ pub async fn spawn_partition(
     tokio::spawn(pw.run());
     partitions.write().await.insert(
         (topic.to_string(), partition),
-        PartitionHandle { pw_tx, tail, cfg },
+        PartitionHandle {
+            pw_tx,
+            tail,
+            cfg,
+            uploader_tx: utx,
+        },
     );
 }

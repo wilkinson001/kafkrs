@@ -4,6 +4,13 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.4.0] — 2026-09-21
+
+Tracks the broker's 0.4.0 release. See `docs/superpowers/specs/2026-09-21-retention-design.md`.
+
+### Changed
+- Regenerated `kafkrs/wire/v1_pb2.py` to include `TopicConfigOverrides.retention_ms` (field 9) and `TopicConfigOverrides.retention_bytes` (field 10). Both are `int64`; `-1` means "no limit on that dimension". Users can now set them when calling `Client.create_topic(...)` with a `v1_pb2.TopicConfigOverrides` argument.
+
 ## [0.3.2] — 2026-05-27
 
 Version bump only — kafkrs-python has no code changes. Stays in lockstep with the broker's 0.3.2 release.

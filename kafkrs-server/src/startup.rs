@@ -55,6 +55,7 @@ pub async fn spawn_partition(
             prefix.clone(),
             topic.to_string(),
             partition,
+            cfg,
             urx,
             dtx,
         )

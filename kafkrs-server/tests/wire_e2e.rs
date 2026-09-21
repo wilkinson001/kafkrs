@@ -120,9 +120,14 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
     .unwrap();
 
     // Spin up an Uploader + PartitionWriter for ("t", 0).
+    let o = TopicConfigOverrides {
+        group_commit_record_count: Some(1),
+        ..Default::default()
+    };
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let (utx, urx) = mpsc::channel::<UploaderMsg>(64);
     let (dtx, mut drx) = mpsc::channel(64);
-    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, urx, dtx).run());
+    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, cfg, urx, dtx).run());
     let (pw_tx, pw_rx) = mpsc::channel(256);
     let (tail, _) = broadcast::channel(1024);
     let pw_tx_d = pw_tx.clone();
@@ -131,11 +136,6 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
             let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
         }
     });
-    let o = TopicConfigOverrides {
-        group_commit_record_count: Some(1),
-        ..Default::default()
-    };
-    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),
         "t".into(),
@@ -474,9 +474,15 @@ async fn setup_broker_with_max_fetch_wait(
     .await
     .unwrap();
 
+    let o = TopicConfigOverrides {
+        group_commit_record_count: Some(1),
+        max_fetch_wait_ms: Some(max_fetch_wait_ms),
+        ..Default::default()
+    };
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let (utx, urx) = mpsc::channel(64);
     let (dtx, mut drx) = mpsc::channel(64);
-    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, urx, dtx).run());
+    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, cfg, urx, dtx).run());
     let (pw_tx, pw_rx) = mpsc::channel(256);
     let (tail, _) = broadcast::channel(1024);
     let pw_tx_d = pw_tx.clone();
@@ -485,12 +491,6 @@ async fn setup_broker_with_max_fetch_wait(
             let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
         }
     });
-    let o = TopicConfigOverrides {
-        group_commit_record_count: Some(1),
-        max_fetch_wait_ms: Some(max_fetch_wait_ms),
-        ..Default::default()
-    };
-    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let pw = PartitionWriter::new(
         dd.into(),
         "t".into(),

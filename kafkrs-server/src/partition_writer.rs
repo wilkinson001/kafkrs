@@ -337,7 +337,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, urx, dtx).run());
+        tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, cfg, urx, dtx).run());
 
         let (tx, rx) = mpsc::channel(8);
         let (ttx, _trx) = broadcast::channel(16);

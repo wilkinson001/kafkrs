@@ -187,6 +187,104 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
     (port, partitions)
 }
 
+async fn setup_broker_with_retention(
+    dd: &str,
+    retention_ms: i64,
+    sweep_interval_ms: u64,
+) -> (u16, Arc<RwLock<HashMap<(String, u32), PartitionHandle>>>) {
+    use kafkrs_server::retention_sweeper::RetentionSweeper;
+    use tokio::time::Duration;
+
+    let store = build_store(
+        &ObjectStoreConfig {
+            backend: "filesystem".into(),
+            bucket: "b".into(),
+            prefix: "".into(),
+            endpoint: "".into(),
+            region: "us-east-1".into(),
+        },
+        dd,
+    )
+    .unwrap();
+    put(
+        &store,
+        &manifest_key("", "t", 0),
+        Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let (utx, urx) = mpsc::channel(64);
+    let (dtx, mut drx) = mpsc::channel(64);
+    let o = TopicConfigOverrides {
+        segment_size_bytes: Some(1),
+        group_commit_record_count: Some(1),
+        retention_ms: Some(retention_ms),
+        ..Default::default()
+    };
+    let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, cfg, urx, dtx).run());
+    let (pw_tx, pw_rx) = mpsc::channel(256);
+    let (tail, _) = broadcast::channel(1024);
+    let pw_tx_d = pw_tx.clone();
+    tokio::spawn(async move {
+        while let Some(d) = drx.recv().await {
+            let _ = pw_tx_d.send(PwMsg::SegmentDurable(d)).await;
+        }
+    });
+    let pw = PartitionWriter::new(
+        dd.into(),
+        "t".into(),
+        0,
+        cfg,
+        0,
+        vec![],
+        pw_rx,
+        utx.clone(),
+        tail.clone(),
+    )
+    .unwrap();
+    tokio::spawn(pw.run());
+
+    let partitions: Arc<RwLock<HashMap<(String, u32), PartitionHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    partitions.write().await.insert(
+        ("t".into(), 0),
+        PartitionHandle {
+            pw_tx,
+            tail,
+            cfg,
+            uploader_tx: utx,
+        },
+    );
+
+    let (reg_tx, reg_rx) = mpsc::channel(8);
+    let registry =
+        TopicRegistry::load(dd.into(), DiskType::Nvme, store.clone(), "".into(), reg_rx).unwrap();
+    tokio::spawn(registry.run());
+
+    let state = SharedState {
+        partitions: partitions.clone(),
+        registry: reg_tx,
+        store,
+        prefix: "".into(),
+        auto_create: false,
+        default_partition_count: 1,
+        data_dir: dd.into(),
+        disk_type: DiskType::Nvme,
+        spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+    };
+
+    tokio::spawn(
+        RetentionSweeper::new(partitions.clone(), Duration::from_millis(sweep_interval_ms)).run(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(accept_loop(listener, state));
+    (port, partitions)
+}
+
 /// Encode a Command + payload to outer wire bytes.
 fn encode(cmd: &Command, payload: &[u8]) -> Bytes {
     let command_size = cmd.encoded_len();
@@ -848,5 +946,90 @@ async fn concurrent_create_topic_same_name_one_wins() {
     match resp.body {
         Some(Body::ProduceResp(r)) => assert_eq!(r.base_offset, 0),
         other => panic!("expected ProduceResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_evicts_old_segments_via_sweeper() {
+    use kafkrs_models::wire::v1::ErrorCode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) =
+        setup_broker_with_retention(dir.path().to_str().unwrap(), 200, 100).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce 3 records; segment_size_bytes = 1 forces sealing after each.
+    for i in 0..3u64 {
+        let produce = Command {
+            correlation_id: 2 + i,
+            body: Some(Body::Produce(ProduceRequest {
+                topic: "t".into(),
+                partition: 0,
+                records: vec![InRecordMeta {
+                    key_len: 1,
+                    value_len: 1,
+                    schema_id: 0,
+                    timestamp_ns: 0,
+                }],
+            })),
+        };
+        sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+        let (resp, _) = read_frame(&mut sock).await;
+        assert!(matches!(resp.body, Some(Body::ProduceResp(_))));
+    }
+
+    // Wait past retention_ms + several sweep intervals so old segments expire
+    // and the sweeper has had time to trigger retention on the partition.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    // Produce one more record to keep the tail active and guarantee a
+    // subsequent kick doesn't race the produce.
+    let produce_tail = Command {
+        correlation_id: 100,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce_tail, b"kv")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    assert!(matches!(resp.body, Some(Body::ProduceResp(_))));
+
+    // Fetch from offset 0. Older segments have been evicted → ErrOffsetOutOfRange.
+    let fetch = Command {
+        correlation_id: 200,
+        body: Some(Body::Fetch(FetchRequest {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_records: 10,
+            max_wait_ms: 0,
+        })),
+    };
+    sock.write_all(&encode(&fetch, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::Error(e)) => {
+            assert_eq!(e.code, ErrorCode::ErrOffsetOutOfRange as i32);
+        }
+        other => panic!("expected Error(ErrOffsetOutOfRange), got {other:?}"),
     }
 }

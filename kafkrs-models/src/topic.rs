@@ -9,6 +9,8 @@ pub const DEFAULT_SEGMENT_SEAL_TIME_MS: u64 = 60_000; // 60 s
 pub const DEFAULT_MAX_KEY_SIZE_BYTES: u32 = 1024; // 1 KiB
 pub const DEFAULT_MAX_VALUE_SIZE_BYTES: u32 = 1024 * 1024; // 1 MiB
 pub const DEFAULT_MAX_FETCH_WAIT_MS: u64 = 60_000; // 60 s
+pub const DEFAULT_RETENTION_MS: i64 = 7 * 24 * 3600 * 1000; // 7 days
+pub const DEFAULT_RETENTION_BYTES: i64 = -1; // no size cap
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct TopicConfigOverrides {
@@ -20,6 +22,8 @@ pub struct TopicConfigOverrides {
     pub group_commit_size_bytes: Option<usize>,
     pub group_commit_record_count: Option<usize>,
     pub max_fetch_wait_ms: Option<u64>,
+    pub retention_ms: Option<i64>,
+    pub retention_bytes: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -50,6 +54,8 @@ pub struct ResolvedTopicConfig {
     pub group_commit_size_bytes: usize,
     pub group_commit_record_count: usize,
     pub max_fetch_wait_ms: u64,
+    pub retention_ms: i64,
+    pub retention_bytes: i64,
 }
 
 impl ResolvedTopicConfig {
@@ -68,6 +74,8 @@ impl ResolvedTopicConfig {
             group_commit_size_bytes: o.group_commit_size_bytes.unwrap_or(p.size_bytes),
             group_commit_record_count: o.group_commit_record_count.unwrap_or(p.record_count),
             max_fetch_wait_ms: o.max_fetch_wait_ms.unwrap_or(DEFAULT_MAX_FETCH_WAIT_MS),
+            retention_ms: o.retention_ms.unwrap_or(DEFAULT_RETENTION_MS),
+            retention_bytes: o.retention_bytes.unwrap_or(DEFAULT_RETENTION_BYTES),
         }
     }
 }
@@ -87,6 +95,20 @@ mod tests {
         assert_eq!(r.group_commit_time_ms, 5); // nvme profile
         assert_eq!(r.group_commit_record_count, 256);
         assert_eq!(r.max_fetch_wait_ms, 60_000);
+        assert_eq!(r.retention_ms, 7 * 24 * 3600 * 1000);
+        assert_eq!(r.retention_bytes, -1);
+    }
+
+    #[test]
+    fn retention_overrides_win() {
+        let o = TopicConfigOverrides {
+            retention_ms: Some(-1), // opt out
+            retention_bytes: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let r = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
+        assert_eq!(r.retention_ms, -1);
+        assert_eq!(r.retention_bytes, 1_000_000_000);
     }
 
     #[test]

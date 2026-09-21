@@ -4,6 +4,16 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.4.0] — 2026-09-21
+
+Retention support lands. Additive proto change; see `docs/superpowers/specs/2026-09-21-retention-design.md`.
+
+### Added
+- `TopicConfigOverrides.retention_ms` (proto field 9, `optional int64`) and `TopicConfigOverrides.retention_bytes` (proto field 10, `optional int64`). Both use `-1` as an infinite-retention sentinel.
+- `ResolvedTopicConfig.retention_ms: i64` and `ResolvedTopicConfig.retention_bytes: i64`.
+- `DEFAULT_RETENTION_MS = 7 * 24 * 3600 * 1000` (7 days) and `DEFAULT_RETENTION_BYTES = -1` (no size cap).
+- `BrokerConfig.retention_sweep_interval_ms: Option<u64>` (default 60_000 ms when absent).
+
 ## [0.3.2] — 2026-05-27
 
 Version bump only — kafkrs-models has no code changes. Stays in lockstep with the broker's 0.3.2 release.

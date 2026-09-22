@@ -1189,8 +1189,7 @@ async fn scrape_path(port: u16, path: &str) -> String {
             Err(e) => panic!("connect to admin port {port}: {e}"),
         }
     }
-    let mut sock =
-        sock.unwrap_or_else(|| panic!("admin listener never accepted on port {port}"));
+    let mut sock = sock.unwrap_or_else(|| panic!("admin listener never accepted on port {port}"));
     let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     sock.write_all(req.as_bytes()).await.unwrap();
     let mut buf = Vec::new();

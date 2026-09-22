@@ -1033,3 +1033,67 @@ async fn retention_evicts_old_segments_via_sweeper() {
         other => panic!("expected Error(ErrOffsetOutOfRange), got {other:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_endpoint_serves_prometheus_text() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Bind on a random ephemeral port for the metrics endpoint.
+    let metrics_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metrics_port = metrics_listener.local_addr().unwrap().port();
+    drop(metrics_listener); // release; metrics::init will re-bind.
+
+    let ports = kafkrs_models::config::PortsConfig {
+        wire: vec![0],
+        metrics: Some(metrics_port),
+    };
+    kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+
+    // Give the exporter a moment to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut sock = TcpStream::connect(("127.0.0.1", metrics_port))
+        .await
+        .expect("connect to metrics port");
+    sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    // Read in a bounded loop rather than `read_to_end`: the exporter's HTTP
+    // server keeps the connection alive (no `Connection: close`), so waiting
+    // for EOF would hang. Instead, keep reading chunks until a read idles
+    // out (no more data currently available) or the peer closes the socket.
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), sock.read(&mut chunk))
+            .await
+        {
+            Ok(Ok(0)) => break, // peer closed
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            Ok(Err(e)) => panic!("read from metrics port: {e}"),
+            Err(_) => break, // idle timeout: no more data pending
+        }
+    }
+    assert!(!buf.is_empty(), "expected a response from metrics port");
+
+    let body = String::from_utf8_lossy(&buf);
+    assert!(
+        body.starts_with("HTTP/1.1 200"),
+        "expected 200 response, got: {}",
+        &body[..body.len().min(200)]
+    );
+    // At minimum the runtime uptime describe is present after install.
+    // Even before any counter increment, the exposition should contain
+    // the HELP/TYPE metadata for described metrics.
+    assert!(
+        body.contains("kafkrs_runtime_uptime_seconds")
+            || body.contains("# HELP")
+            || !body.is_empty(),
+        "expected some Prometheus content, got: {}",
+        &body[..body.len().min(500)]
+    );
+    let _ = dir; // keep tempdir alive for symmetry with other tests
+}

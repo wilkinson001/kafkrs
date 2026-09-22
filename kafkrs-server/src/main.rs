@@ -30,6 +30,9 @@ async fn main() {
         .unwrap_or_else(|| "./config.toml".to_string());
     let cfg: kafkrs_models::config::Config = config::load_config(config_path);
 
+    kafkrs_server::metrics::init(&cfg.ports, cfg.broker.metrics_high_cardinality)
+        .expect("metrics init");
+
     let store: Arc<dyn ::object_store::ObjectStore> =
         build_store(&cfg.object_store, &cfg.data_dir).expect("object store");
     let prefix: String = cfg.object_store.prefix.clone();

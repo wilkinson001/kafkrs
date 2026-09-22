@@ -81,25 +81,26 @@ static HIGH_CARDINALITY: AtomicBool = AtomicBool::new(false);
 
 /// Install the global Prometheus recorder and start the HTTP scrape listener.
 /// No-op (returns `Ok(())`) when `ports.metrics` is `None`.
-///
-/// Concrete listener wiring + describe_all invocation lands in Task 4;
-/// this task keeps `init` as a pure no-op so the module compiles and can
-/// be unit-tested independently.
 pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
     HIGH_CARDINALITY.store(high_cardinality, Ordering::Relaxed);
-    if ports.metrics.is_none() {
+    let Some(port) = ports.metrics else {
         return Ok(());
-    }
-    // Task 4 wires the PrometheusBuilder + calls describe_all here.
+    };
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use std::net::SocketAddr;
+
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    PrometheusBuilder::new()
+        .set_buckets(LATENCY_BUCKETS_MS)?
+        .with_http_listener(addr)
+        .install()?;
+    describe_all();
     Ok(())
 }
 
 /// Register HELP text and units for every metric the broker emits.
-/// Called once from `init` after the recorder is installed (Task 4).
+/// Called once from `init` after the recorder is installed.
 /// Every metric constant listed above must have an entry here.
-// Not yet called from `init` — Task 4 wires the invocation once the
-// recorder is installed. Remove this allow once that call site lands.
-#[allow(dead_code)]
 pub(crate) fn describe_all() {
     // Produce
     metrics::describe_counter!(PRODUCE_RECORDS, "Records accepted by produce");

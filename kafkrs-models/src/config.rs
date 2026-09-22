@@ -3,11 +3,18 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     pub address: String,
-    pub ports: Vec<u16>,
+    pub ports: PortsConfig,
     pub data_dir: String,
     #[serde(default)]
     pub broker: BrokerConfig,
     pub object_store: ObjectStoreConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PortsConfig {
+    pub wire: Vec<u16>,
+    #[serde(default)]
+    pub metrics: Option<u16>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -20,6 +27,8 @@ pub struct BrokerConfig {
     pub default_partition_count: u32,
     #[serde(default)]
     pub retention_sweep_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub metrics_high_cardinality: bool,
 }
 
 impl Default for BrokerConfig {
@@ -29,6 +38,7 @@ impl Default for BrokerConfig {
             auto_create_topics: false,
             default_partition_count: default_partition_count(),
             retention_sweep_interval_ms: None,
+            metrics_high_cardinality: false,
         }
     }
 }
@@ -99,8 +109,10 @@ mod tests {
     fn parses_full_config_and_applies_disk_profile() {
         let toml = r#"
 address = "127.0.0.1"
-ports = [5432]
 data_dir = "./data"
+
+[ports]
+wire = [5432]
 
 [broker]
 disk_type = "nvme"
@@ -115,7 +127,8 @@ endpoint = ""
 region = "us-east-1"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.ports, vec![5432]);
+        assert_eq!(cfg.ports.wire, vec![5432]);
+        assert_eq!(cfg.ports.metrics, None);
         assert_eq!(cfg.data_dir, "./data");
         assert_eq!(cfg.broker.disk_type, DiskType::Nvme);
         assert!(!cfg.broker.auto_create_topics);
@@ -141,8 +154,11 @@ region = "us-east-1"
     fn defaults_apply_when_optional_sections_absent() {
         let toml = r#"
 address = "127.0.0.1"
-ports = [5432]
 data_dir = "./data"
+
+[ports]
+wire = [5432]
+
 [object_store]
 backend = "filesystem"
 bucket = "b"
@@ -159,8 +175,11 @@ bucket = "b"
     fn retention_sweep_interval_ms_parses_when_set() {
         let toml = r#"
 address = "127.0.0.1"
-ports = [5432]
 data_dir = "./data"
+
+[ports]
+wire = [5432]
+
 [broker]
 retention_sweep_interval_ms = 30000
 [object_store]
@@ -169,5 +188,79 @@ bucket = "b"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.broker.retention_sweep_interval_ms, Some(30_000));
+    }
+
+    #[test]
+    fn ports_metrics_parses_when_set() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+metrics = 9464
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.ports.wire, vec![5432]);
+        assert_eq!(cfg.ports.metrics, Some(9464));
+    }
+
+    #[test]
+    fn metrics_high_cardinality_defaults_false() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.broker.metrics_high_cardinality);
+    }
+
+    #[test]
+    fn metrics_high_cardinality_parses_when_set() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[broker]
+metrics_high_cardinality = true
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.broker.metrics_high_cardinality);
+    }
+
+    #[test]
+    fn old_top_level_ports_fails_helpfully() {
+        let toml = r#"
+address = "127.0.0.1"
+ports = [5432]
+data_dir = "./data"
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("ports"),
+            "error should mention `ports` field, got: {err}"
+        );
     }
 }

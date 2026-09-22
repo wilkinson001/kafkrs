@@ -1042,10 +1042,8 @@ pub async fn handle_metadata(
             };
         }
     };
-    let by_name: HashMap<String, TopicEntry> = snapshot
-        .into_iter()
-        .map(|t| (t.name.clone(), t))
-        .collect();
+    let by_name: HashMap<String, TopicEntry> =
+        snapshot.into_iter().map(|t| (t.name.clone(), t)).collect();
 
     // Determine the topic list to return.
     let leader_id = state.identity.broker_id.to_string();

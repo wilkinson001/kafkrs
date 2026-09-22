@@ -14,7 +14,7 @@ use kafkrs_models::topic::ResolvedTopicConfig;
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// A sealed batch handed from the PartitionWriter to the Uploader.
 pub struct SealedBatch {
@@ -28,6 +28,16 @@ pub struct SealedBatch {
 pub enum UploaderMsg {
     Upload(SealedBatch),
     RetentionKick,
+    /// Drain signal used by DeleteTopic. Any `Upload` messages enqueued
+    /// before this one (e.g. by PartitionWriter's `seal_and_handoff` during
+    /// its own shutdown) are processed first because the channel is FIFO
+    /// and PartitionWriter's Shutdown ack — which the caller awaits before
+    /// sending this — only fires after `seal_and_handoff` has already
+    /// enqueued them. Acking confirms all prior uploads + manifest writes
+    /// are durable, so the caller can safely snapshot manifests afterward.
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 /// Notification sent back when a segment is durable in the object store
@@ -119,6 +129,17 @@ impl Uploader {
                     if let Err(e) = self.retention_pass("kick").await {
                         log::warn!("retention_pass on kick failed: {e:?}");
                     }
+                }
+                UploaderMsg::Shutdown { ack } => {
+                    // All Upload messages enqueued before this Shutdown were
+                    // already processed above (mpsc is FIFO), so every
+                    // pending PUT + manifest update is durable by the time
+                    // we ack. No further Upload/RetentionKick can arrive:
+                    // the topic's partitions are removed from
+                    // state.partitions (and PartitionWriter is gone) before
+                    // handle_delete_topic sends this message.
+                    let _ = ack.send(());
+                    return;
                 }
             }
         }

@@ -791,6 +791,21 @@ pub async fn handle_delete_topic(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
     }
 
+    // Send Shutdown to each partition's Uploader and await its ack. The
+    // PartitionWriter Shutdown above already ran seal_and_handoff, so any
+    // final sealed batch is already enqueued on uploader_tx; draining to
+    // this Shutdown message guarantees the segment PUT + manifest update
+    // are durable before we snapshot manifests below (spec invariant:
+    // WAL/manifest state is quiesced when the client sees success).
+    for h in &handles_to_shutdown {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = h
+            .uploader_tx
+            .send(crate::uploader::UploaderMsg::Shutdown { ack: ack_tx })
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+    }
+
     // Clean up spawn_locks entries for this topic's partitions.
     {
         let mut locks = state.spawn_locks.lock().unwrap();

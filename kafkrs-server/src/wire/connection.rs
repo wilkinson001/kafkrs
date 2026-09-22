@@ -14,8 +14,8 @@ use crate::metrics::{
 };
 use crate::wire::dispatch::{
     handle_alter_topic_config, handle_connected, handle_create_topic, handle_delete_topic,
-    handle_describe_topic, handle_fetch, handle_list_topics, handle_ping, handle_produce,
-    SharedState, PROTOCOL_VERSION,
+    handle_describe_topic, handle_fetch, handle_list_topics, handle_metadata, handle_ping,
+    handle_produce, SharedState, PROTOCOL_VERSION,
 };
 use crate::wire::errors::make_error;
 use crate::wire::frame::{decode_frame_body, encode_frame, Frame, MAX_FRAME_SIZE};
@@ -272,6 +272,7 @@ async fn dispatch_one(
         Body::ListTopics(_) => "list_topics",
         Body::DeleteTopic(_) => "delete_topic",
         Body::AlterTopicConfig(_) => "alter_topic_config",
+        Body::Metadata(_) => "metadata",
         _ => "unknown",
     };
     let response = match body {
@@ -293,6 +294,7 @@ async fn dispatch_one(
         Body::ListTopics(_) => handle_list_topics(correlation_id, state).await,
         Body::DeleteTopic(req) => handle_delete_topic(correlation_id, state, req).await,
         Body::AlterTopicConfig(req) => handle_alter_topic_config(correlation_id, state, req).await,
+        Body::Metadata(req) => handle_metadata(correlation_id, state, req).await,
         // Variants the broker should never receive as a request:
         Body::Connect(_)
         | Body::Connected(_)
@@ -304,7 +306,6 @@ async fn dispatch_one(
         | Body::ListTopicsResp(_)
         | Body::DeleteTopicResp(_)
         | Body::AlterTopicConfigResp(_)
-        | Body::Metadata(_)
         | Body::MetadataResp(_)
         | Body::Error(_) => Frame {
             command: make_error(

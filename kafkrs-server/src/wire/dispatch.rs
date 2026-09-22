@@ -972,7 +972,8 @@ pub async fn handle_alter_topic_config(
         let guard = state.partitions.read().await;
         guard
             .iter()
-            .filter_map(|((t, _p), h)| (t == &topic).then(|| h.clone()))
+            .filter(|((t, _p), _)| t == &topic)
+            .map(|(_, h)| h.clone())
             .collect()
     };
     for h in &handles {

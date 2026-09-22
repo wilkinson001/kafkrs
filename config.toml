@@ -3,8 +3,10 @@ data_dir = "./data"
 
 [ports]
 wire = [5432]
-# Uncomment to enable Prometheus metrics scrape endpoint:
-# metrics = 9464
+# Optional admin HTTP endpoints — each is independently opt-in.
+# If both are set to the same port value, one listener serves the merged routes.
+# metrics = 9464   # Prometheus scrape endpoint (GET /metrics)
+# health  = 9465   # Liveness + readiness (GET /health, GET /ready)
 
 [broker]
 disk_type = "nvme"

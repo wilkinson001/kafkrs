@@ -45,6 +45,7 @@ fn init_metrics_once() -> u16 {
             let ports = kafkrs_models::config::PortsConfig {
                 wire: vec![0],
                 metrics: Some(port),
+                health: None,
             };
             kafkrs_server::metrics::init(&ports, true).expect("metrics init");
             tx.send(port).expect("send port");

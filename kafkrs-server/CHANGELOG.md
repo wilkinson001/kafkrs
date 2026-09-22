@@ -4,6 +4,19 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.1] — 2026-09-22
+
+Additive release: broker liveness and readiness endpoints on an independent `ports.health` admin port.
+
+### Added
+- `PortsConfig.health: Option<u16>` — independent from `ports.metrics`. Serves `GET /health` and `GET /ready`. When set to the same port value as `ports.metrics`, one merged listener serves all three routes.
+- `GET /health` — always returns `200 OK` + `ok` while the broker process is running. Suitable for Kubernetes liveness probes and load-balancer health checks.
+- `GET /ready` — returns `503 Service Unavailable` during startup and flips to `200 OK` once wire listeners are bound (`main.rs` calls `metrics::set_ready(true)` at that point). Suitable for Kubernetes readiness probes.
+- `pub fn metrics::set_ready(bool)` for callers that want to gate readiness on additional conditions.
+
+### Changed
+- The admin HTTP endpoint is now hand-rolled inside `metrics::init` instead of relying on `PrometheusBuilder::with_http_listener`. `install_recorder()` returns a `PrometheusHandle` whose `.render()` produces the exposition text on demand. `metrics::init` now plans and spawns 0, 1, or 2 listeners depending on which admin ports are configured; routes are gated per-listener so a `ports.health`-only listener returns 404 for `/metrics` and vice versa.
+
 ## [0.6.0] — 2026-09-22
 
 DeleteTopic: mark-and-sweep semantics with fast client response, restart-safe pending state, and topic UUIDs baked into object-store prefixes so `Delete + Create` under the same name is race-free. See `docs/superpowers/specs/2026-09-22-delete-topic-design.md`.

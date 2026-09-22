@@ -48,6 +48,10 @@ fn init_metrics_once() -> u16 {
             let ports = kafkrs_models::config::PortsConfig {
                 wire: vec![0],
                 metrics: Some(port),
+                // Reuse the same port so /metrics + /health + /ready are
+                // all served on the merged listener — exercises the
+                // same-port coupling path used by the health-endpoint tests.
+                health: Some(port),
             };
             kafkrs_server::metrics::init(&ports, false).expect("metrics init");
             tx.send(port).expect("send port");
@@ -1168,6 +1172,66 @@ async fn metrics_endpoint_serves_prometheus_text() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let body = scrape_metrics(port).await;
     assert!(body.starts_with("HTTP/1.1 200"), "got: {body}");
+}
+
+/// Scrape an arbitrary path on the admin port using the same raw-TCP + retry
+/// pattern as [`scrape_metrics`]. Sends `Connection: close` so the response
+/// terminates promptly.
+async fn scrape_path(port: u16, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    let mut sock = None;
+    for _ in 0..30 {
+        match TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(s) => {
+                sock = Some(s);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("connect to admin port {port}: {e}"),
+        }
+    }
+    let mut sock = sock.unwrap_or_else(|| panic!("admin listener never accepted on port {port}"));
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    sock.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sock.read_to_end(&mut buf),
+    )
+    .await
+    .expect("scrape timeout");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_endpoint_returns_200() {
+    let port = init_metrics_once();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let body = scrape_path(port, "/health").await;
+    assert!(body.starts_with("HTTP/1.1 200"), "got: {body}");
+    assert!(body.contains("ok"), "expected 'ok' body, got: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ready_endpoint_starts_503_then_flips_to_200() {
+    let port = init_metrics_once();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Nothing else in the test binary calls set_ready(true), so this
+    // assertion is stable regardless of test ordering.
+    let body = scrape_path(port, "/ready").await;
+    assert!(
+        body.starts_with("HTTP/1.1 503"),
+        "expected 503 before set_ready, got: {body}"
+    );
+    kafkrs_server::metrics::set_ready(true);
+    let body = scrape_path(port, "/ready").await;
+    assert!(
+        body.starts_with("HTTP/1.1 200"),
+        "expected 200 after set_ready(true), got: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

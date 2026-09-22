@@ -27,17 +27,37 @@ static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 /// Installs the global Prometheus recorder exactly once for the whole test
 /// binary (the `metrics` crate's global recorder can only be installed
 /// once per process) and returns the ephemeral port it is listening on.
+///
+/// The install is performed from a dedicated std thread that has NO
+/// ambient tokio runtime, so `PrometheusBuilder::install()` takes its
+/// fallback branch and spawns its own runtime on a background thread
+/// owned by the process — not the per-test `#[tokio::test]` runtime.
+/// Without this, the exporter future is spawned onto whichever test's
+/// runtime happened to win the race for `call_once`, and dies when
+/// that test's runtime is dropped, breaking every subsequent test.
 fn init_metrics_once() -> u16 {
     METRICS_INIT.call_once(|| {
-        // Grab a random ephemeral port before init.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for port pick");
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let ports = kafkrs_models::config::PortsConfig {
-            wire: vec![0],
-            metrics: Some(port),
-        };
-        kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+        let (tx, rx) = std::sync::mpsc::channel::<u16>();
+        std::thread::spawn(move || {
+            // Grab a random ephemeral port before init.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for port pick");
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let ports = kafkrs_models::config::PortsConfig {
+                wire: vec![0],
+                metrics: Some(port),
+            };
+            kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+            tx.send(port).expect("send port");
+            // Keep this thread alive so any thread-local state the exporter
+            // relies on outlives every test in the binary. `install()` on
+            // this path spawns its own background thread with a
+            // current-thread runtime, so this thread's own lifetime
+            // doesn't strictly own the exporter — but keeping it parked
+            // is defensive against future changes.
+            std::thread::park();
+        });
+        let port = rx.recv().expect("recv port");
         METRICS_PORT.set(port).expect("port set");
         // Give exporter time to bind.
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -48,10 +68,30 @@ fn init_metrics_once() -> u16 {
 /// Raw TCP HTTP scrape of `/metrics`. Sends `Connection: close` so the
 /// exporter's HTTP server closes the socket once the response is written,
 /// letting `read_to_end` return promptly instead of hanging on keep-alive.
+///
+/// The initial `TcpStream::connect` is wrapped in a bounded retry loop
+/// because `metrics::init` re-binds the exporter port asynchronously after
+/// `init_metrics_once` picks it via an ephemeral-port `TcpListener` and
+/// drops it — there is a genuine TOCTOU window between drop and re-bind
+/// during which `connect` returns `ConnectionRefused`. Up to 30 × 50ms =
+/// 1.5s of retries covers that window on loaded CI runners.
 async fn scrape_metrics(port: u16) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut sock = None;
+    for _ in 0..30 {
+        match TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(s) => {
+                sock = Some(s);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("connect to metrics port {port}: {e}"),
+        }
+    }
+    let mut sock = sock.unwrap_or_else(|| panic!("metrics exporter never accepted on port {port}"));
     sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();

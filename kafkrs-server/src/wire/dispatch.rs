@@ -799,22 +799,25 @@ pub async fn handle_delete_topic(
         }
     }
 
-    // Remove the WAL directory for this topic.
-    let wal_dir = std::path::Path::new(&state.data_dir)
-        .join("wal")
-        .join(&topic);
-    if wal_dir.exists() {
-        if let Err(e) = tokio::fs::remove_dir_all(&wal_dir).await {
-            log::warn!("failed to remove WAL dir {}: {e:?}", wal_dir.display());
-        }
-    }
-
     if delete_data {
         use crate::deletion::sweep_deletion;
         use crate::object_store::{get, manifest_key};
         use crate::pending_deletes::{append, PendingDelete};
         use kafkrs_models::manifest::Manifest;
         use std::collections::BTreeMap;
+
+        // Remove the WAL directory for this topic. Gated on delete_data
+        // because `delete_data = false` is "detach" semantics per spec:
+        // WAL files and object-store data are left untouched for the user
+        // to handle out-of-band.
+        let wal_dir = std::path::Path::new(&state.data_dir)
+            .join("wal")
+            .join(&topic);
+        if wal_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&wal_dir).await {
+                log::warn!("failed to remove WAL dir {}: {e:?}", wal_dir.display());
+            }
+        }
 
         let mut manifests_by_partition: BTreeMap<u32, Manifest> = BTreeMap::new();
         for p in 0..partition_count {

@@ -1557,13 +1557,13 @@ async fn delete_topic_delete_data_false_preserves_object_store_data() {
         topic_uuid_root.display()
     );
 
-    // Assert the WAL dir is gone: DeleteTopic always tears down the WAL
-    // directory regardless of delete_data (only object-store data is
-    // preserved by delete_data=false).
+    // Assert the WAL dir is ALSO still present under delete_data=false: per
+    // spec, "detach" leaves both storage tiers alone (WAL + object-store).
     let wal_dir = dir.path().join("wal").join("t");
     assert!(
-        !wal_dir.exists(),
-        "WAL dir should have been removed by DeleteTopic"
+        wal_dir.exists(),
+        "WAL dir should still exist after delete_data=false: {}",
+        wal_dir.display()
     );
 }
 

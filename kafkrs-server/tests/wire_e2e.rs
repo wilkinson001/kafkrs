@@ -10,6 +10,7 @@ use kafkrs_models::topic::{
 use kafkrs_models::wire::v1::{
     command::Body, Command, ConnectRequest, FetchRequest, InRecordMeta, ProduceRequest,
 };
+use kafkrs_server::broker_identity::BrokerIdentity;
 use kafkrs_server::object_store::{build_store, manifest_key, put};
 use kafkrs_server::partition_writer::{PartitionWriter, PwMsg};
 use kafkrs_server::topic_registry::TopicRegistry;
@@ -27,6 +28,15 @@ static METRICS_INIT: std::sync::Once = std::sync::Once::new();
 static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
 const TOPIC_UUID: &str = "01936a80-0000-7000-8000-000000000000";
+
+fn test_identity() -> BrokerIdentity {
+    BrokerIdentity {
+        broker_id: Arc::from("brk-testtest".to_string()),
+        cluster_id: Arc::from("test-cluster".to_string()),
+        advertised_host: Arc::from("127.0.0.1".to_string()),
+        advertised_port: 5432,
+    }
+}
 
 /// Installs the global Prometheus recorder exactly once for the whole test
 /// binary (the `metrics` crate's global recorder can only be installed
@@ -144,6 +154,7 @@ async fn setup_broker_no_topics(dd: &str) -> u16 {
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -183,6 +194,7 @@ async fn setup_broker_auto_create(dd: &str) -> u16 {
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -303,6 +315,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -411,6 +424,7 @@ async fn setup_broker_with_retention(
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     tokio::spawn(
@@ -787,6 +801,7 @@ async fn setup_broker_with_max_fetch_wait(
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

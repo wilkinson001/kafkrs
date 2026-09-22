@@ -36,7 +36,6 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex as TokioMutex, RwLock};
 pub type PartitionSpawnLocks = Arc<StdMutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>>;
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const BROKER_ID: &str = "kafkrs-broker-v1";
 
 /// Handle to a partition's actor: an mpsc sender for the PartitionWriter,
 /// a broadcast sender for tail subscribers, the resolved per-topic config
@@ -66,6 +65,7 @@ pub struct SharedState {
     pub data_dir: String,
     pub disk_type: DiskType,
     pub spawn_locks: PartitionSpawnLocks,
+    pub identity: crate::broker_identity::BrokerIdentity,
 }
 
 // ---- Per-RPC handlers ----
@@ -80,14 +80,14 @@ pub fn handle_ping(correlation_id: u64) -> Frame {
     }
 }
 
-pub fn handle_connected(correlation_id: u64) -> Frame {
+pub fn handle_connected(correlation_id: u64, state: &SharedState) -> Frame {
     Frame {
         command: Command {
             correlation_id,
             body: Some(Body::Connected(ConnectedResponse {
                 protocol_version: PROTOCOL_VERSION,
-                broker_id: BROKER_ID.to_string(),
-                cluster_id: String::new(),
+                broker_id: state.identity.broker_id.to_string(),
+                cluster_id: state.identity.cluster_id.to_string(),
             })),
         },
         payload: Bytes::new(),

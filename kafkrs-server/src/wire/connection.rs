@@ -190,7 +190,7 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                     break;
                 }
                 count_rpc("connect", 0);
-                let _ = resp_tx.send(handle_connected(cid)).await;
+                let _ = resp_tx.send(handle_connected(cid, &state)).await;
                 connected = true;
             }
             (false, _) => {

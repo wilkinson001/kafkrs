@@ -8,6 +8,7 @@
 //! - Writer: drains a response-Command mpsc and writes one frame at a time so
 //!   no two responses interleave bytes on the socket.
 
+use crate::metrics::{LABEL_ERROR_CODE, LABEL_RPC, WIRE_RPC_REQUESTS};
 use crate::wire::dispatch::{
     handle_connected, handle_create_topic, handle_describe_topic, handle_fetch, handle_list_topics,
     handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
@@ -218,7 +219,16 @@ async fn dispatch_one(
     payload: Bytes,
     state: &SharedState,
 ) -> Frame {
-    match body {
+    let __rpc = match &body {
+        Body::Ping(_) => "ping",
+        Body::Produce(_) => "produce",
+        Body::Fetch(_) => "fetch",
+        Body::CreateTopic(_) => "create_topic",
+        Body::DescribeTopic(_) => "describe_topic",
+        Body::ListTopics(_) => "list_topics",
+        _ => "unknown",
+    };
+    let response = match body {
         Body::Ping(_) => handle_ping(correlation_id),
         Body::Produce(req) => {
             handle_produce(
@@ -252,5 +262,16 @@ async fn dispatch_one(
             ),
             payload: Bytes::new(),
         },
-    }
+    };
+    let __err_code = match &response.command.body {
+        Some(Body::Error(e)) => e.code.to_string(),
+        _ => "0".to_string(),
+    };
+    metrics::counter!(
+        WIRE_RPC_REQUESTS,
+        LABEL_RPC => __rpc,
+        LABEL_ERROR_CODE => __err_code
+    )
+    .increment(1);
+    response
 }

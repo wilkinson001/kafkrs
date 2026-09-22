@@ -21,6 +21,50 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+static METRICS_INIT: std::sync::Once = std::sync::Once::new();
+static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+/// Installs the global Prometheus recorder exactly once for the whole test
+/// binary (the `metrics` crate's global recorder can only be installed
+/// once per process) and returns the ephemeral port it is listening on.
+fn init_metrics_once() -> u16 {
+    METRICS_INIT.call_once(|| {
+        // Grab a random ephemeral port before init.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for port pick");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let ports = kafkrs_models::config::PortsConfig {
+            wire: vec![0],
+            metrics: Some(port),
+        };
+        kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+        METRICS_PORT.set(port).expect("port set");
+        // Give exporter time to bind.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    });
+    *METRICS_PORT.get().expect("metrics port set")
+}
+
+/// Raw TCP HTTP scrape of `/metrics`. Sends `Connection: close` so the
+/// exporter's HTTP server closes the socket once the response is written,
+/// letting `read_to_end` return promptly instead of hanging on keep-alive.
+async fn scrape_metrics(port: u16) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sock.read_to_end(&mut buf),
+    )
+    .await
+    .expect("scrape timeout");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 async fn setup_broker_no_topics(dd: &str) -> u16 {
     let store = build_store(
         &ObjectStoreConfig {
@@ -1036,64 +1080,62 @@ async fn retention_evicts_old_segments_via_sweeper() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn metrics_endpoint_serves_prometheus_text() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    let port = init_metrics_once();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let body = scrape_metrics(port).await;
+    assert!(body.starts_with("HTTP/1.1 200"), "got: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_produce_counter_increments() {
+    let metrics_port = init_metrics_once();
 
     let dir = tempfile::tempdir().unwrap();
-    // Bind on a random ephemeral port for the metrics endpoint.
-    let metrics_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let metrics_port = metrics_listener.local_addr().unwrap().port();
-    drop(metrics_listener); // release; metrics::init will re-bind.
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
-    let ports = kafkrs_models::config::PortsConfig {
-        wire: vec![0],
-        metrics: Some(metrics_port),
+    // Connect + produce 3 records on topic "t".
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
     };
-    kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
 
-    // Give the exporter a moment to bind.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let mut sock = TcpStream::connect(("127.0.0.1", metrics_port))
-        .await
-        .expect("connect to metrics port");
-    sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .unwrap();
-
-    // Read in a bounded loop rather than `read_to_end`: the exporter's HTTP
-    // server keeps the connection alive (no `Connection: close`), so waiting
-    // for EOF would hang. Instead, keep reading chunks until a read idles
-    // out (no more data currently available) or the peer closes the socket.
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_millis(500), sock.read(&mut chunk))
-            .await
-        {
-            Ok(Ok(0)) => break, // peer closed
-            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
-            Ok(Err(e)) => panic!("read from metrics port: {e}"),
-            Err(_) => break, // idle timeout: no more data pending
-        }
+    for i in 0..3u64 {
+        let produce = Command {
+            correlation_id: 2 + i,
+            body: Some(Body::Produce(ProduceRequest {
+                topic: "t".into(),
+                partition: 0,
+                records: vec![InRecordMeta {
+                    key_len: 1,
+                    value_len: 1,
+                    schema_id: 0,
+                    timestamp_ns: 0,
+                }],
+            })),
+        };
+        sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+        let (resp, _) = read_frame(&mut sock).await;
+        assert!(matches!(resp.body, Some(Body::ProduceResp(_))));
     }
-    assert!(!buf.is_empty(), "expected a response from metrics port");
 
-    let body = String::from_utf8_lossy(&buf);
+    let body = scrape_metrics(metrics_port).await;
+    // Prometheus exposition: dots become underscores.
     assert!(
-        body.starts_with("HTTP/1.1 200"),
-        "expected 200 response, got: {}",
-        &body[..body.len().min(200)]
+        body.contains("messaging_kafkrs_produce_records"),
+        "produce records metric missing; body:\n{body}"
     );
-    // At minimum the runtime uptime describe is present after install.
-    // Even before any counter increment, the exposition should contain
-    // the HELP/TYPE metadata for described metrics.
-    assert!(
-        body.contains("kafkrs_runtime_uptime_seconds")
-            || body.contains("# HELP")
-            || !body.is_empty(),
-        "expected some Prometheus content, got: {}",
-        &body[..body.len().min(500)]
-    );
-    let _ = dir; // keep tempdir alive for symmetry with other tests
+    // Assert the counter reflects 3 records for topic "t".
+    let has_count = body.lines().any(|l| {
+        l.contains("messaging_kafkrs_produce_records")
+            && l.contains(r#"topic="t""#)
+            && l.trim().ends_with(" 3")
+    });
+    assert!(has_count, "expected count of 3 for topic=t; body:\n{body}");
 }

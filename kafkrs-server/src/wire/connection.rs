@@ -300,6 +300,8 @@ async fn dispatch_one(
         | Body::DescribeTopicResp(_)
         | Body::ListTopicsResp(_)
         | Body::DeleteTopicResp(_)
+        | Body::AlterTopicConfig(_)
+        | Body::AlterTopicConfigResp(_)
         | Body::Error(_) => Frame {
             command: make_error(
                 correlation_id,

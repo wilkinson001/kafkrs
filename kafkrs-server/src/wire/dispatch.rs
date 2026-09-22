@@ -5,8 +5,9 @@
 
 use crate::fetcher::{fetch, FetchRequest};
 use crate::metrics::{
-    FETCH_BYTES, FETCH_ERRORS, FETCH_LATENCY_MS, FETCH_RECORDS, FETCH_REQUESTS, LABEL_ERROR_CODE,
-    LABEL_TOPIC, PRODUCE_BYTES, PRODUCE_ERRORS, PRODUCE_LATENCY_MS, PRODUCE_RECORDS,
+    partition_label, partition_label_with, FETCH_BYTES, FETCH_ERRORS, FETCH_LATENCY_MS,
+    FETCH_RECORDS, FETCH_REQUESTS, LABEL_ERROR_CODE, PRODUCE_BYTES, PRODUCE_ERRORS,
+    PRODUCE_LATENCY_MS, PRODUCE_RECORDS,
 };
 use crate::partition_writer::{IncomingRecord, PwMsg};
 use crate::startup::spawn_partition;
@@ -102,8 +103,14 @@ pub async fn handle_produce(
     if records_meta.is_empty() {
         metrics::counter!(
             PRODUCE_ERRORS,
-            LABEL_TOPIC => topic.clone(),
-            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrMalformedFrame as i32)
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                )],
+            )
         )
         .increment(1);
         return Frame {
@@ -131,8 +138,14 @@ pub async fn handle_produce(
         {
             metrics::counter!(
                 PRODUCE_ERRORS,
-                LABEL_TOPIC => topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                    )],
+                )
             )
             .increment(1);
             return Frame {
@@ -169,8 +182,14 @@ pub async fn handle_produce(
             Ok(Err(RegistryError::Io(msg))) => {
                 metrics::counter!(
                     PRODUCE_ERRORS,
-                    LABEL_TOPIC => topic.clone(),
-                    LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrInternal as i32)
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrInternal as i32)
+                        )],
+                    )
                 )
                 .increment(1);
                 return Frame {
@@ -185,8 +204,14 @@ pub async fn handle_produce(
             Err(_) => {
                 metrics::counter!(
                     PRODUCE_ERRORS,
-                    LABEL_TOPIC => topic.clone(),
-                    LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                        )],
+                    )
                 )
                 .increment(1);
                 return Frame {
@@ -205,8 +230,14 @@ pub async fn handle_produce(
     let Some(handle) = handle else {
         metrics::counter!(
             PRODUCE_ERRORS,
-            LABEL_TOPIC => topic.clone(),
-            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrUnknownTopic as i32)
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrUnknownTopic as i32)
+                )],
+            )
         )
         .increment(1);
         return Frame {
@@ -220,8 +251,14 @@ pub async fn handle_produce(
         if m.key_len > handle.cfg.max_key_size_bytes {
             metrics::counter!(
                 PRODUCE_ERRORS,
-                LABEL_TOPIC => topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrKeyTooLarge as i32)
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrKeyTooLarge as i32)
+                    )],
+                )
             )
             .increment(1);
             return Frame {
@@ -239,8 +276,14 @@ pub async fn handle_produce(
         if m.value_len > handle.cfg.max_value_size_bytes {
             metrics::counter!(
                 PRODUCE_ERRORS,
-                LABEL_TOPIC => topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrRecordTooLarge as i32)
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrRecordTooLarge as i32)
+                    )],
+                )
             )
             .increment(1);
             return Frame {
@@ -266,8 +309,14 @@ pub async fn handle_produce(
         if cursor + kl + vl > payload.len() {
             metrics::counter!(
                 PRODUCE_ERRORS,
-                LABEL_TOPIC => topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                    )],
+                )
             )
             .increment(1);
             return Frame {
@@ -292,8 +341,14 @@ pub async fn handle_produce(
     if cursor != payload.len() {
         metrics::counter!(
             PRODUCE_ERRORS,
-            LABEL_TOPIC => topic.clone(),
-            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrMalformedFrame as i32)
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                )],
+            )
         )
         .increment(1);
         return Frame {
@@ -321,8 +376,14 @@ pub async fn handle_produce(
     {
         metrics::counter!(
             PRODUCE_ERRORS,
-            LABEL_TOPIC => topic.clone(),
-            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                )],
+            )
         )
         .increment(1);
         return Frame {
@@ -332,9 +393,10 @@ pub async fn handle_produce(
     }
     match ack_rx.await {
         Ok(hwm) => {
-            metrics::counter!(PRODUCE_RECORDS, LABEL_TOPIC => __topic.clone()).increment(n as u64);
-            metrics::counter!(PRODUCE_BYTES, LABEL_TOPIC => __topic.clone()).increment(__bytes);
-            metrics::histogram!(PRODUCE_LATENCY_MS, LABEL_TOPIC => __topic.clone())
+            let __labels = partition_label(&__topic, partition);
+            metrics::counter!(PRODUCE_RECORDS, &__labels).increment(n as u64);
+            metrics::counter!(PRODUCE_BYTES, &__labels).increment(__bytes);
+            metrics::histogram!(PRODUCE_LATENCY_MS, &__labels)
                 .record(__start.elapsed().as_secs_f64() * 1000.0);
             Frame {
                 command: Command {
@@ -351,8 +413,14 @@ pub async fn handle_produce(
         Err(_) => {
             metrics::counter!(
                 PRODUCE_ERRORS,
-                LABEL_TOPIC => topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                    )],
+                )
             )
             .increment(1);
             Frame {
@@ -370,7 +438,8 @@ pub async fn handle_fetch(
 ) -> Frame {
     let __start = std::time::Instant::now();
     let __topic = req.topic.clone();
-    metrics::counter!(FETCH_REQUESTS, LABEL_TOPIC => __topic.clone()).increment(1);
+    let __partition = req.partition;
+    metrics::counter!(FETCH_REQUESTS, &partition_label(&__topic, __partition)).increment(1);
 
     let handle = {
         let guard = state.partitions.read().await;
@@ -379,8 +448,14 @@ pub async fn handle_fetch(
     let Some(handle) = handle else {
         metrics::counter!(
             FETCH_ERRORS,
-            LABEL_TOPIC => __topic.clone(),
-            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrUnknownTopic as i32)
+            &partition_label_with(
+                &__topic,
+                __partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrUnknownTopic as i32)
+                )],
+            )
         )
         .increment(1);
         return Frame {
@@ -409,8 +484,11 @@ pub async fn handle_fetch(
             let err_code = fetch_error_code(&e);
             metrics::counter!(
                 FETCH_ERRORS,
-                LABEL_TOPIC => __topic.clone(),
-                LABEL_ERROR_CODE => format!("{}", err_code as i32)
+                &partition_label_with(
+                    &__topic,
+                    __partition,
+                    &[(LABEL_ERROR_CODE, format!("{}", err_code as i32))],
+                )
             )
             .increment(1);
             return Frame {
@@ -439,10 +517,10 @@ pub async fn handle_fetch(
         .iter()
         .map(|r| (r.key.len() + r.value.len()) as u64)
         .sum();
-    metrics::counter!(FETCH_RECORDS, LABEL_TOPIC => __topic.clone())
-        .increment(returned_records_count);
-    metrics::counter!(FETCH_BYTES, LABEL_TOPIC => __topic.clone()).increment(returned_bytes);
-    metrics::histogram!(FETCH_LATENCY_MS, LABEL_TOPIC => __topic.clone())
+    let __labels = partition_label(&__topic, __partition);
+    metrics::counter!(FETCH_RECORDS, &__labels).increment(returned_records_count);
+    metrics::counter!(FETCH_BYTES, &__labels).increment(returned_bytes);
+    metrics::histogram!(FETCH_LATENCY_MS, &__labels)
         .record(__start.elapsed().as_secs_f64() * 1000.0);
     Frame {
         command: Command {

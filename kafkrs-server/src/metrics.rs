@@ -276,6 +276,19 @@ pub fn partition_label(topic: &str, partition: u32) -> Vec<(&'static str, String
     v
 }
 
+/// Same as [`partition_label`], but with additional labels appended (e.g.
+/// `error_code`, `source`, `trigger`). Used at call sites where the metric
+/// already carries another label alongside `topic`/`partition`.
+pub fn partition_label_with(
+    topic: &str,
+    partition: u32,
+    extras: &[(&'static str, String)],
+) -> Vec<(&'static str, String)> {
+    let mut v = partition_label(topic, partition);
+    v.extend_from_slice(extras);
+    v
+}
+
 /// Full list of every metric name constant. Used by tests to verify
 /// uniqueness and to spot-check that describes stay in sync with call
 /// sites when new metrics are added.
@@ -348,6 +361,31 @@ mod tests {
             vec![
                 (LABEL_TOPIC, "orders".to_string()),
                 (LABEL_PARTITION, "3".to_string()),
+            ]
+        );
+        HIGH_CARDINALITY.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn partition_label_with_appends_extras_and_respects_flag() {
+        HIGH_CARDINALITY.store(false, Ordering::Relaxed);
+        let labels = partition_label_with("orders", 3, &[(LABEL_ERROR_CODE, "7".to_string())]);
+        assert_eq!(
+            labels,
+            vec![
+                (LABEL_TOPIC, "orders".to_string()),
+                (LABEL_ERROR_CODE, "7".to_string()),
+            ]
+        );
+
+        HIGH_CARDINALITY.store(true, Ordering::Relaxed);
+        let labels = partition_label_with("orders", 3, &[(LABEL_ERROR_CODE, "7".to_string())]);
+        assert_eq!(
+            labels,
+            vec![
+                (LABEL_TOPIC, "orders".to_string()),
+                (LABEL_PARTITION, "3".to_string()),
+                (LABEL_ERROR_CODE, "7".to_string()),
             ]
         );
         HIGH_CARDINALITY.store(false, Ordering::Relaxed);

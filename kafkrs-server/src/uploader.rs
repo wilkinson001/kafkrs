@@ -1,7 +1,8 @@
 use crate::metrics::{
-    LABEL_TOPIC, LABEL_TRIGGER, RETENTION_BYTES_EVICTED, RETENTION_DELETE_FAILURES,
-    RETENTION_PASSES, RETENTION_SEGMENTS_EVICTED, UPLOADER_BYTES_UPLOADED,
-    UPLOADER_SEGMENTS_UPLOADED, UPLOADER_UPLOAD_LATENCY_MS, UPLOADER_UPLOAD_RETRIES,
+    partition_label, partition_label_with, LABEL_TRIGGER, RETENTION_BYTES_EVICTED,
+    RETENTION_DELETE_FAILURES, RETENTION_PASSES, RETENTION_SEGMENTS_EVICTED,
+    UPLOADER_BYTES_UPLOADED, UPLOADER_SEGMENTS_UPLOADED, UPLOADER_UPLOAD_LATENCY_MS,
+    UPLOADER_UPLOAD_RETRIES,
 };
 use crate::object_store::{get, manifest_key, put, segment_key};
 use crate::segment::write_segment;
@@ -74,7 +75,7 @@ impl Uploader {
             match msg {
                 UploaderMsg::Upload(batch) => {
                     let __start = std::time::Instant::now();
-                    let __topic = self.topic.clone();
+                    let __labels = partition_label(&self.topic, self.partition);
                     let __bytes = batch
                         .records
                         .iter()
@@ -84,8 +85,7 @@ impl Uploader {
                         match self.upload_once(&batch).await {
                             Ok(()) => break,
                             Err(e) => {
-                                metrics::counter!(UPLOADER_UPLOAD_RETRIES, LABEL_TOPIC => __topic.clone())
-                                    .increment(1);
+                                metrics::counter!(UPLOADER_UPLOAD_RETRIES, &__labels).increment(1);
                                 log::error!(
                                     "upload failed for base_offset={}: {e:?}; retrying",
                                     batch.base_offset
@@ -94,11 +94,9 @@ impl Uploader {
                             }
                         }
                     }
-                    metrics::counter!(UPLOADER_SEGMENTS_UPLOADED, LABEL_TOPIC => __topic.clone())
-                        .increment(1);
-                    metrics::counter!(UPLOADER_BYTES_UPLOADED, LABEL_TOPIC => __topic.clone())
-                        .increment(__bytes);
-                    metrics::histogram!(UPLOADER_UPLOAD_LATENCY_MS, LABEL_TOPIC => __topic.clone())
+                    metrics::counter!(UPLOADER_SEGMENTS_UPLOADED, &__labels).increment(1);
+                    metrics::counter!(UPLOADER_BYTES_UPLOADED, &__labels).increment(__bytes);
+                    metrics::histogram!(UPLOADER_UPLOAD_LATENCY_MS, &__labels)
                         .record(__start.elapsed().as_secs_f64() * 1000.0);
 
                     let _ = self
@@ -160,10 +158,15 @@ impl Uploader {
         use crate::object_store::delete;
         use crate::retention::evaluate_eviction;
 
+        // "Passes attempted" is the useful semantic: increment before any
+        // fallible call so a failed GET below still counts as a pass.
         metrics::counter!(
             RETENTION_PASSES,
-            LABEL_TOPIC => self.topic.clone(),
-            LABEL_TRIGGER => trigger
+            &partition_label_with(
+                &self.topic,
+                self.partition,
+                &[(LABEL_TRIGGER, trigger.to_string())]
+            )
         )
         .increment(1);
 
@@ -181,10 +184,9 @@ impl Uploader {
         }
 
         let __evicted_bytes: u64 = evict.iter().map(|s| s.byte_size).sum();
-        metrics::counter!(RETENTION_SEGMENTS_EVICTED, LABEL_TOPIC => self.topic.clone())
-            .increment(evict.len() as u64);
-        metrics::counter!(RETENTION_BYTES_EVICTED, LABEL_TOPIC => self.topic.clone())
-            .increment(__evicted_bytes);
+        let __labels = partition_label(&self.topic, self.partition);
+        metrics::counter!(RETENTION_SEGMENTS_EVICTED, &__labels).increment(evict.len() as u64);
+        metrics::counter!(RETENTION_BYTES_EVICTED, &__labels).increment(__evicted_bytes);
 
         let evict_keys: Vec<String> = evict.iter().map(|s| s.object_key.clone()).collect();
         manifest
@@ -201,8 +203,7 @@ impl Uploader {
             let seg_key: ObjPath =
                 segment_key(&self.prefix, &self.topic, self.partition, seg.base_offset);
             if let Err(e) = delete(&self.store, &seg_key).await {
-                metrics::counter!(RETENTION_DELETE_FAILURES, LABEL_TOPIC => self.topic.clone())
-                    .increment(1);
+                metrics::counter!(RETENTION_DELETE_FAILURES, &__labels).increment(1);
                 log::warn!(
                     "delete failed for segment base_offset={}: {e:?}; orphan accepted",
                     seg.base_offset

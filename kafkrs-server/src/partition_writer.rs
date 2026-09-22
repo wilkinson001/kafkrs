@@ -1,5 +1,5 @@
 use crate::metrics::{
-    LABEL_TOPIC, PARTITION_BYTES_IN_MEMORY, PARTITION_HWM_OFFSET, PARTITION_RECORDS_IN_MEMORY,
+    partition_label, PARTITION_BYTES_IN_MEMORY, PARTITION_HWM_OFFSET, PARTITION_RECORDS_IN_MEMORY,
     PARTITION_SEGMENTS_UPLOADED, PARTITION_WAL_FILES,
 };
 use crate::uploader::{SealedBatch, SegmentDurable, UploaderMsg};
@@ -115,18 +115,17 @@ impl PartitionWriter {
             tail_tx,
         };
         pw.update_state_gauges(active_records as u64, active_bytes as u64);
-        metrics::gauge!(PARTITION_HWM_OFFSET, LABEL_TOPIC => pw.topic.clone())
-            .set(pw.next_offset as f64);
-        metrics::gauge!(PARTITION_WAL_FILES, LABEL_TOPIC => pw.topic.clone()).increment(1.0);
+        let __labels = partition_label(&pw.topic, pw.partition);
+        metrics::gauge!(PARTITION_HWM_OFFSET, &__labels).set(pw.next_offset as f64);
+        metrics::gauge!(PARTITION_WAL_FILES, &__labels).increment(1.0);
         Ok(pw)
     }
 
     /// Reflect the active batch's current record/byte counts in the gauges.
     fn update_state_gauges(&self, records: u64, bytes: u64) {
-        metrics::gauge!(PARTITION_RECORDS_IN_MEMORY, LABEL_TOPIC => self.topic.clone())
-            .set(records as f64);
-        metrics::gauge!(PARTITION_BYTES_IN_MEMORY, LABEL_TOPIC => self.topic.clone())
-            .set(bytes as f64);
+        let __labels = partition_label(&self.topic, self.partition);
+        metrics::gauge!(PARTITION_RECORDS_IN_MEMORY, &__labels).set(records as f64);
+        metrics::gauge!(PARTITION_BYTES_IN_MEMORY, &__labels).set(bytes as f64);
     }
 
     fn hwm(&self) -> i64 {
@@ -215,8 +214,11 @@ impl PartitionWriter {
         self.active.extend(batch);
         let _ = self.tail_tx.send(self.hwm());
         self.update_state_gauges(self.active.len() as u64, self.active_bytes as u64);
-        metrics::gauge!(PARTITION_HWM_OFFSET, LABEL_TOPIC => self.topic.clone())
-            .set(self.next_offset as f64);
+        metrics::gauge!(
+            PARTITION_HWM_OFFSET,
+            &partition_label(&self.topic, self.partition)
+        )
+        .set(self.next_offset as f64);
 
         if self.active_bytes as u64 >= self.cfg.segment_size_bytes {
             self.seal().await;
@@ -258,7 +260,11 @@ impl PartitionWriter {
             self.segment_base,
         )
         .expect("open next WAL");
-        metrics::gauge!(PARTITION_WAL_FILES, LABEL_TOPIC => self.topic.clone()).increment(1.0);
+        metrics::gauge!(
+            PARTITION_WAL_FILES,
+            &partition_label(&self.topic, self.partition)
+        )
+        .increment(1.0);
     }
 
     fn on_durable(&mut self, d: SegmentDurable) {
@@ -267,9 +273,9 @@ impl PartitionWriter {
         let path: std::path::PathBuf =
             WalFile::wal_path(&self.data_dir, &self.topic, self.partition, d.base_offset);
         let _ = std::fs::remove_file(path);
-        metrics::gauge!(PARTITION_SEGMENTS_UPLOADED, LABEL_TOPIC => self.topic.clone())
-            .increment(1.0);
-        metrics::gauge!(PARTITION_WAL_FILES, LABEL_TOPIC => self.topic.clone()).decrement(1.0);
+        let __labels = partition_label(&self.topic, self.partition);
+        metrics::gauge!(PARTITION_SEGMENTS_UPLOADED, &__labels).increment(1.0);
+        metrics::gauge!(PARTITION_WAL_FILES, &__labels).decrement(1.0);
     }
 
     fn locate(&self, from_offset: i64) -> LocateResult {

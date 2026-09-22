@@ -1,4 +1,6 @@
-use crate::metrics::{FETCH_LONG_POLL_WAIT_MS, FETCH_SOURCE, LABEL_SOURCE, LABEL_TOPIC};
+use crate::metrics::{
+    partition_label, partition_label_with, FETCH_LONG_POLL_WAIT_MS, FETCH_SOURCE, LABEL_SOURCE,
+};
 use crate::object_store::{get, manifest_key, segment_key};
 use crate::partition_writer::{LocateResult, PwMsg};
 use anyhow::Result;
@@ -47,6 +49,7 @@ pub async fn fetch(
         return Err(FetchError::OffsetOutOfRange);
     }
     let topic = req.topic.clone();
+    let partition = req.partition;
     let loc: LocateResult = locate(pw_tx, req.from_offset).await?;
     match loc {
         LocateResult::Hwm(hwm) => {
@@ -68,13 +71,13 @@ pub async fn fetch(
                 }
             })
             .await;
-            metrics::histogram!(FETCH_LONG_POLL_WAIT_MS, LABEL_TOPIC => topic.clone())
+            metrics::histogram!(FETCH_LONG_POLL_WAIT_MS, &partition_label(&topic, partition))
                 .record(__wait_start.elapsed().as_secs_f64() * 1000.0);
             // re-resolve once after wake
             match locate(pw_tx, req.from_offset).await? {
                 LocateResult::InActiveBatch => {
                     let resp = read_active(pw_tx, &req).await?;
-                    record_source(&topic, "memory", resp.records.len());
+                    record_source(&topic, partition, "memory", resp.records.len());
                     Ok(resp)
                 }
                 LocateResult::Hwm(h) => Ok(FetchResponse {
@@ -83,19 +86,19 @@ pub async fn fetch(
                 }),
                 _ => {
                     let resp = read_object_store(req, store, prefix).await?;
-                    record_source(&topic, "object_store", resp.records.len());
+                    record_source(&topic, partition, "object_store", resp.records.len());
                     Ok(resp)
                 }
             }
         }
         LocateResult::InActiveBatch => {
             let resp = read_active(pw_tx, &req).await?;
-            record_source(&topic, "memory", resp.records.len());
+            record_source(&topic, partition, "memory", resp.records.len());
             Ok(resp)
         }
         LocateResult::InFlight => match read_object_store(req, store, prefix).await {
             Ok(resp) => {
-                record_source(&topic, "object_store", resp.records.len());
+                record_source(&topic, partition, "object_store", resp.records.len());
                 Ok(resp)
             }
             Err(_) => Ok(FetchResponse {
@@ -105,7 +108,7 @@ pub async fn fetch(
         },
         LocateResult::BelowInFlight => {
             let resp = read_object_store(req, store, prefix).await?;
-            record_source(&topic, "object_store", resp.records.len());
+            record_source(&topic, partition, "object_store", resp.records.len());
             Ok(resp)
         }
     }
@@ -114,14 +117,13 @@ pub async fn fetch(
 /// Emits `fetch.source`, incrementing by the number of records actually
 /// returned from that tier. No-op on a zero-record read (e.g. hwm hit with
 /// nothing new) so the metric reflects records served, not read attempts.
-fn record_source(topic: &str, source: &'static str, records: usize) {
+fn record_source(topic: &str, partition: u32, source: &'static str, records: usize) {
     if records == 0 {
         return;
     }
     metrics::counter!(
         FETCH_SOURCE,
-        LABEL_TOPIC => topic.to_string(),
-        LABEL_SOURCE => source
+        &partition_label_with(topic, partition, &[(LABEL_SOURCE, source.to_string())])
     )
     .increment(records as u64);
 }

@@ -748,8 +748,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dd = dir.path().to_str().unwrap().to_string();
         let (tx, rx) = mpsc::channel(4);
-        let reg = TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx)
-            .unwrap();
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
         tokio::spawn(reg.run());
 
         // Create two topics.
@@ -786,8 +786,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dd = dir.path().to_str().unwrap().to_string();
         let (tx, rx) = mpsc::channel(4);
-        let reg = TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx)
-            .unwrap();
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
         tokio::spawn(reg.run());
 
         let (r, rr) = oneshot::channel();

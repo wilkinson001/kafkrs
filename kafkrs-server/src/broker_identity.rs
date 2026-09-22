@@ -95,7 +95,9 @@ mod tests {
     fn is_valid_broker_id(id: &str) -> bool {
         id.starts_with("brk-")
             && id.len() == 12
-            && id[4..].chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            && id[4..]
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
     }
 
     #[test]

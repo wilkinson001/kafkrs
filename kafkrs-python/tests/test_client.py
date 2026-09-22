@@ -53,6 +53,7 @@ wire = [{port}]
 disk_type = "nvme"
 auto_create_topics = true
 default_partition_count = 1
+cluster_id = "test-cluster"
 
 [object_store]
 backend = "filesystem"
@@ -156,6 +157,7 @@ wire = [{port}]
 disk_type = "nvme"
 auto_create_topics = false
 default_partition_count = 1
+cluster_id = "test-cluster"
 
 [object_store]
 backend = "filesystem"
@@ -260,3 +262,90 @@ async def test_alter_topic_config_invalid_value_raises(broker_no_auto_create: in
         with pytest.raises(WireError) as excinfo:
             await client.alter_topic_config(topic, overrides)
         assert excinfo.value.code == v1_pb2.ERR_INVALID_CONFIG
+
+
+async def test_get_metadata_returns_broker_and_topic_info(broker_no_auto_create):
+    port = broker_no_auto_create
+    async with Client("127.0.0.1", port) as client:
+        await client.create_topic("orders", partition_count=2)
+        resp = await client.get_metadata()
+        assert resp.cluster_id  # non-empty
+        assert len(resp.brokers) == 1
+        assert resp.brokers[0].broker_id  # non-empty
+        names = [t.topic for t in resp.topics]
+        assert "orders" in names
+        t = next(t for t in resp.topics if t.topic == "orders")
+        assert t.error_code == 0
+        assert t.topic_uuid  # non-empty
+        assert len(t.partitions) == 2
+        for p in t.partitions:
+            assert p.leader_broker_id == resp.brokers[0].broker_id
+
+
+async def test_get_metadata_filter_returns_subset(broker_no_auto_create):
+    port = broker_no_auto_create
+    async with Client("127.0.0.1", port) as client:
+        await client.create_topic("a", partition_count=1)
+        await client.create_topic("b", partition_count=1)
+        resp = await client.get_metadata(topics=["a"])
+        names = [t.topic for t in resp.topics]
+        assert names == ["a"]
+
+
+async def test_get_metadata_unknown_topic_has_per_topic_error(broker_no_auto_create):
+    port = broker_no_auto_create
+    async with Client("127.0.0.1", port) as client:
+        await client.create_topic("real", partition_count=1)
+        resp = await client.get_metadata(topics=["real", "not-a-topic"])
+        by_name = {t.topic: t for t in resp.topics}
+        assert by_name["real"].error_code == 0
+        assert by_name["real"].topic_uuid  # non-empty
+        assert len(by_name["real"].partitions) == 1
+        assert by_name["not-a-topic"].error_code == v1_pb2.ERR_UNKNOWN_TOPIC
+        assert by_name["not-a-topic"].topic_uuid == ""
+        assert len(by_name["not-a-topic"].partitions) == 0
+
+
+async def test_connect_populates_cluster_id_on_response(broker_no_auto_create):
+    # The Connect response is consumed by Client.connect(), which doesn't
+    # currently expose the parsed ConnectedResponse. This test drives out
+    # a client-side change to make cluster_id observable, OR runs a raw
+    # Connect through _roundtrip to inspect the response directly.
+    # Follow the second approach — it exercises the wire without changing
+    # the Client public API.
+    port = broker_no_auto_create
+    async with Client("127.0.0.1", port) as client:
+        # Send a Ping/Pong to prove the client is connected, then inspect
+        # nothing further — the meaningful assertion is that the wire
+        # request/response roundtrip already validated cluster_id shape.
+        # For an assertion, do a raw Connect + response inspection via the
+        # module-level helper. Since the Client already consumed the
+        # single Connect on construction, dial a fresh socket:
+        pass
+
+    # Fresh raw socket to inspect the Connect response.
+    import asyncio, struct
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        cmd = v1_pb2.Command()
+        cmd.correlation_id = 42
+        cmd.connect.protocol_version = 1
+        cmd.connect.client_id = "cluster-id-test"
+        cmd_bytes = cmd.SerializeToString()
+        total_size = 4 + len(cmd_bytes)
+        writer.write(struct.pack(">II", total_size, len(cmd_bytes)))
+        writer.write(cmd_bytes)
+        await writer.drain()
+
+        outer = await reader.readexactly(4)
+        (resp_total,) = struct.unpack(">I", outer)
+        body = await reader.readexactly(resp_total)
+        (resp_cmd_size,) = struct.unpack(">I", body[:4])
+        resp = v1_pb2.Command()
+        resp.ParseFromString(body[4 : 4 + resp_cmd_size])
+        assert resp.WhichOneof("body") == "connected"
+        assert resp.connected.broker_id  # non-empty
+        assert resp.connected.cluster_id  # non-empty
+    finally:
+        writer.close()
+        await writer.wait_closed()

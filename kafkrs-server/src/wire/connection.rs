@@ -8,7 +8,10 @@
 //! - Writer: drains a response-Command mpsc and writes one frame at a time so
 //!   no two responses interleave bytes on the socket.
 
-use crate::metrics::{LABEL_ERROR_CODE, LABEL_RPC, WIRE_RPC_REQUESTS};
+use crate::metrics::{
+    LABEL_ERROR_CODE, LABEL_RPC, WIRE_CONNECTIONS_ACCEPTED, WIRE_CONNECTIONS_ACTIVE,
+    WIRE_RPC_REQUESTS,
+};
 use crate::wire::dispatch::{
     handle_connected, handle_create_topic, handle_describe_topic, handle_fetch, handle_list_topics,
     handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
@@ -30,6 +33,26 @@ use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 const CONNECTION_RESPONSE_BUFFER: usize = 256;
 const CONNECTION_REQUEST_BUFFER: usize = 256;
 
+/// Tracks a connection's lifetime for the `connections_active` gauge.
+/// Increments the accepted counter and active gauge on construction;
+/// decrements the active gauge on drop so the gauge stays balanced on
+/// both graceful and panic-driven task exits.
+struct ConnectionGuard;
+
+impl ConnectionGuard {
+    fn new() -> Self {
+        metrics::counter!(WIRE_CONNECTIONS_ACCEPTED).increment(1);
+        metrics::gauge!(WIRE_CONNECTIONS_ACTIVE).increment(1.0);
+        ConnectionGuard
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(WIRE_CONNECTIONS_ACTIVE).decrement(1.0);
+    }
+}
+
 /// Accept loop bound to one TCP listener. Spawns one connection task per
 /// accepted socket. Replaces the loop in `main.rs` that called
 /// `Listener::new(...).process()`.
@@ -40,6 +63,7 @@ pub async fn accept_loop(listener: TcpListener, state: SharedState) {
                 debug!("accepted connection from {peer}");
                 let st = state.clone();
                 tokio::spawn(async move {
+                    let _guard = ConnectionGuard::new();
                     run_connection(socket, st).await;
                     debug!("connection {peer} closed");
                 });

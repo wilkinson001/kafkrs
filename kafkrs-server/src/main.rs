@@ -94,6 +94,24 @@ async fn main() {
         Duration::from_millis(cfg.broker.retention_sweep_interval_ms.unwrap_or(60_000));
     tokio::spawn(RetentionSweeper::new(partitions.clone(), sweep_interval).run());
 
+    // Resume any in-flight deletion sweeps left over from a prior broker run.
+    let pending = kafkrs_server::pending_deletes::load_all(&cfg.data_dir)
+        .await
+        .expect("load pending deletes");
+    for record in pending {
+        metrics::gauge!(kafkrs_server::metrics::DELETE_PENDING_TOPICS).increment(1.0);
+        let store = store.clone();
+        let prefix = prefix.clone();
+        let data_dir = cfg.data_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                kafkrs_server::deletion::sweep_deletion(record, store, prefix, data_dir).await
+            {
+                log::warn!("startup-resumed sweep_deletion failed: {e:?}");
+            }
+        });
+    }
+
     for port in cfg.ports.wire.clone() {
         let addr: String = format!("{}:{}", cfg.address, port);
         let listener: TcpListener = TcpListener::bind(&addr).await.expect("bind");

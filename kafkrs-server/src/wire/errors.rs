@@ -74,6 +74,16 @@ mod tests {
     }
 
     #[test]
+    fn registry_invalid_config_maps_to_err_invalid_config() {
+        assert_eq!(
+            registry_error_code(&RegistryError::InvalidConfig(
+                "segment_size_bytes = 0".into()
+            )),
+            ErrorCode::ErrInvalidConfig,
+        );
+    }
+
+    #[test]
     fn make_error_sets_correlation_id_and_body() {
         let cmd = make_error(123, ErrorCode::ErrUnknownTopic, "no such topic");
         assert_eq!(cmd.correlation_id, 123);

@@ -89,7 +89,7 @@ async fn main() {
         Duration::from_millis(cfg.broker.retention_sweep_interval_ms.unwrap_or(60_000));
     tokio::spawn(RetentionSweeper::new(partitions.clone(), sweep_interval).run());
 
-    for port in cfg.ports.clone() {
+    for port in cfg.ports.wire.clone() {
         let addr: String = format!("{}:{}", cfg.address, port);
         let listener: TcpListener = TcpListener::bind(&addr).await.expect("bind");
         info!("Listening on {addr}");

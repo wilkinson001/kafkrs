@@ -52,8 +52,12 @@ The broker reads its config from a TOML file. The repo ships a working default a
 
 ```toml
 address = "127.0.0.1"
-ports = [5432]
 data_dir = "./data"
+
+[ports]
+wire = [5432]
+# Uncomment to enable Prometheus metrics scrape endpoint:
+# metrics = 9464
 
 [broker]
 disk_type = "nvme"           # nvme | ssd | rotational

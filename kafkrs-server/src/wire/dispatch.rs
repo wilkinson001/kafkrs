@@ -208,6 +208,31 @@ pub async fn handle_produce(
                     payload: Bytes::new(),
                 };
             }
+            Ok(Err(RegistryError::InvalidConfig(_))) => {
+                // EnsureExists always passes TopicConfigOverrides::default(),
+                // which is always valid; unreachable in practice, but the
+                // shared RegistryError type requires this arm to be exhaustive.
+                metrics::counter!(
+                    PRODUCE_ERRORS,
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrInternal as i32)
+                        )],
+                    )
+                )
+                .increment(1);
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        ErrorCode::ErrInternal,
+                        "auto-create failed: unexpected InvalidConfig",
+                    ),
+                    payload: Bytes::new(),
+                };
+            }
             Ok(Err(RegistryError::Io(msg))) => {
                 metrics::counter!(
                     PRODUCE_ERRORS,

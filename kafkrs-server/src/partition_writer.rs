@@ -40,7 +40,10 @@ pub enum PwMsg {
     },
     /// Uploader signalled a segment is durable.
     SegmentDurable(SegmentDurable),
-    Shutdown,
+    /// Graceful shutdown: seal any in-flight batch (best-effort), hand it off
+    /// to the uploader, then ack once quiesced. Used by DeleteTopic to
+    /// guarantee WAL/manifest state is settled before the RPC responds.
+    Shutdown { ack: oneshot::Sender<()> },
 }
 
 #[derive(Debug, PartialEq)]
@@ -159,7 +162,24 @@ impl PartitionWriter {
                             let _ = reply.send(self.read_active(from_offset, max_records));
                         }
                         Some(PwMsg::SegmentDurable(d)) => self.on_durable(d),
-                        Some(PwMsg::Shutdown) | None => { self.flush_commit().await; break; }
+                        Some(PwMsg::Shutdown { ack }) => {
+                            self.flush_commit().await;
+                            // Best-effort seal of the active batch so any records already
+                            // fsync'd to WAL get handed to the uploader for eventual
+                            // object-store upload. If sealing fails, log and proceed — the
+                            // WAL is intact and can be replayed on next boot if this topic
+                            // isn't deleted with delete_data=true.
+                            if let Err(e) = self.seal_and_handoff().await {
+                                log::warn!(
+                                    "partition_writer {}::{} shutdown seal failed: {e:?}",
+                                    self.topic,
+                                    self.partition
+                                );
+                            }
+                            let _ = ack.send(());
+                            return;
+                        }
+                        None => { self.flush_commit().await; break; }
                     }
                 }
                 _ = tokio::time::sleep(timeout), if self.pending_first_arrival.is_some() => {
@@ -229,14 +249,20 @@ impl PartitionWriter {
         .set(self.next_offset as f64);
 
         if self.active_bytes as u64 >= self.cfg.segment_size_bytes {
-            self.seal().await;
+            if let Err(e) = self.seal_and_handoff().await {
+                log::warn!(
+                    "partition_writer {}::{} seal failed: {e:?}",
+                    self.topic,
+                    self.partition
+                );
+            }
         }
     }
 
     /// Freeze the active batch, hand it to the Uploader, open the next WAL.
-    async fn seal(&mut self) {
+    async fn seal_and_handoff(&mut self) -> Result<()> {
         if self.active.is_empty() {
-            return;
+            return Ok(());
         }
         let records: Vec<Record> = std::mem::take(&mut self.active);
         self.active_bytes = 0;
@@ -266,13 +292,13 @@ impl PartitionWriter {
             &self.topic,
             self.partition,
             self.segment_base,
-        )
-        .expect("open next WAL");
+        )?;
         metrics::gauge!(
             PARTITION_WAL_FILES,
             &partition_label(&self.topic, self.partition)
         )
         .increment(1.0);
+        Ok(())
     }
 
     fn on_durable(&mut self, d: SegmentDurable) {
@@ -432,6 +458,42 @@ mod tests {
         .unwrap();
         assert_eq!(lrx.await.unwrap(), LocateResult::Hwm(0));
 
-        tx.send(PwMsg::Shutdown).await.unwrap();
+        let (stx, srx) = oneshot::channel();
+        tx.send(PwMsg::Shutdown { ack: stx }).await.unwrap();
+        srx.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_message_acks_and_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let cfg = small_cfg();
+        let (utx, _urx) = mpsc::channel(16);
+        let (pw_tx, pw_rx) = mpsc::channel(16);
+        let (tail_tx, _tail_rx) = broadcast::channel(16);
+        let pw = PartitionWriter::new(
+            dd,
+            "t".into(),
+            "test-uuid".into(),
+            0,
+            cfg,
+            0,
+            vec![],
+            pw_rx,
+            utx,
+            tail_tx,
+        )
+        .unwrap();
+        let handle = tokio::spawn(pw.run());
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        pw_tx.send(PwMsg::Shutdown { ack: ack_tx }).await.unwrap();
+        ack_rx.await.unwrap();
+
+        // Task should have exited (its handle joins cleanly).
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("actor did not exit within 1s")
+            .expect("actor task panicked");
     }
 }

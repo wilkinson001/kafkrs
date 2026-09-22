@@ -1,4 +1,5 @@
 pub mod config;
+pub mod deletion;
 pub mod fetcher;
 pub mod metrics;
 pub mod object_store;

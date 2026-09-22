@@ -368,6 +368,12 @@ pub(crate) const ALL_METRIC_NAMES: &[&str] = &[
 mod tests {
     use super::*;
 
+    /// Serializes tests that toggle the process-global `HIGH_CARDINALITY`
+    /// flag. Without this, `cargo test`'s default parallel execution races
+    /// two tests' `store(true)` / `store(false)` calls against each other's
+    /// assertions.
+    static HIGH_CARDINALITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn latency_buckets_are_monotonically_increasing() {
         for w in LATENCY_BUCKETS_MS.windows(2) {
@@ -386,6 +392,9 @@ mod tests {
 
     #[test]
     fn partition_label_respects_flag() {
+        let _guard = HIGH_CARDINALITY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         HIGH_CARDINALITY.store(false, Ordering::Relaxed);
         let labels = partition_label("orders", 3);
         assert_eq!(labels, vec![(LABEL_TOPIC, "orders".to_string())]);
@@ -404,6 +413,9 @@ mod tests {
 
     #[test]
     fn partition_label_with_appends_extras_and_respects_flag() {
+        let _guard = HIGH_CARDINALITY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         HIGH_CARDINALITY.store(false, Ordering::Relaxed);
         let labels = partition_label_with("orders", 3, &[(LABEL_ERROR_CODE, "7".to_string())]);
         assert_eq!(

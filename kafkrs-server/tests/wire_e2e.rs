@@ -1171,11 +1171,84 @@ async fn metrics_produce_counter_increments() {
         body.contains("messaging_kafkrs_produce_records"),
         "produce records metric missing; body:\n{body}"
     );
-    // Assert the counter reflects 3 records for topic "t".
+    // Assert the counter reflects at least the 3 records produced above.
+    // Not an exact match: this test shares topic "t" and the process-global
+    // Prometheus recorder (see `init_metrics_once`) with other metrics e2e
+    // tests (e.g. `metrics_fetch_counters_increment`), which may add their
+    // own produce activity on the same topic when tests run concurrently.
     let has_count = body.lines().any(|l| {
-        l.contains("messaging_kafkrs_produce_records")
-            && l.contains(r#"topic="t""#)
-            && l.trim().ends_with(" 3")
+        if !l.contains("messaging_kafkrs_produce_records") || !l.contains(r#"topic="t""#) {
+            return false;
+        }
+        l.trim()
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v >= 3.0)
     });
-    assert!(has_count, "expected count of 3 for topic=t; body:\n{body}");
+    assert!(has_count, "expected count >= 3 for topic=t; body:\n{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_fetch_counters_increment() {
+    let metrics_port = init_metrics_once();
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // `setup_broker` only wires up topic "t" partition 0, so we must use
+    // that topic name. This test only checks for the presence of metric
+    // families (not exact counts), so it tolerates topic="t" activity from
+    // other metrics tests sharing the process-global Prometheus recorder
+    // (see `init_metrics_once`).
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce one record then fetch it.
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+    let (_resp, _) = read_frame(&mut sock).await;
+
+    let fetch = Command {
+        correlation_id: 3,
+        body: Some(Body::Fetch(FetchRequest {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_records: 10,
+            max_wait_ms: 0,
+        })),
+    };
+    sock.write_all(&encode(&fetch, b"")).await.unwrap();
+    let (_resp, _) = read_frame(&mut sock).await;
+
+    let body = scrape_metrics(metrics_port).await;
+    assert!(
+        body.contains("messaging_kafkrs_fetch_requests"),
+        "fetch.requests missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("messaging_kafkrs_fetch_source"),
+        "fetch.source missing; body:\n{body}"
+    );
 }

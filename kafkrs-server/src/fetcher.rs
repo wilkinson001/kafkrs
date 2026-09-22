@@ -1,3 +1,4 @@
+use crate::metrics::{FETCH_LONG_POLL_WAIT_MS, FETCH_SOURCE, LABEL_SOURCE, LABEL_TOPIC};
 use crate::object_store::{get, manifest_key, segment_key};
 use crate::partition_writer::{LocateResult, PwMsg};
 use anyhow::Result;
@@ -45,6 +46,7 @@ pub async fn fetch(
     if req.from_offset < 0 {
         return Err(FetchError::OffsetOutOfRange);
     }
+    let topic = req.topic.clone();
     let loc: LocateResult = locate(pw_tx, req.from_offset).await?;
     match loc {
         LocateResult::Hwm(hwm) => {
@@ -55,6 +57,7 @@ pub async fn fetch(
                 });
             }
             let mut sub: broadcast::Receiver<i64> = tail.subscribe();
+            let __wait_start = std::time::Instant::now();
             let _ = timeout(Duration::from_millis(req.max_wait_ms), async {
                 loop {
                     match sub.recv().await {
@@ -65,25 +68,62 @@ pub async fn fetch(
                 }
             })
             .await;
+            metrics::histogram!(FETCH_LONG_POLL_WAIT_MS, LABEL_TOPIC => topic.clone())
+                .record(__wait_start.elapsed().as_secs_f64() * 1000.0);
             // re-resolve once after wake
             match locate(pw_tx, req.from_offset).await? {
-                LocateResult::InActiveBatch => read_active(pw_tx, &req).await,
+                LocateResult::InActiveBatch => {
+                    let resp = read_active(pw_tx, &req).await?;
+                    record_source(&topic, "memory", resp.records.len());
+                    Ok(resp)
+                }
                 LocateResult::Hwm(h) => Ok(FetchResponse {
                     records: vec![],
                     hwm: h,
                 }),
-                _ => read_object_store(req, store, prefix).await,
+                _ => {
+                    let resp = read_object_store(req, store, prefix).await?;
+                    record_source(&topic, "object_store", resp.records.len());
+                    Ok(resp)
+                }
             }
         }
-        LocateResult::InActiveBatch => read_active(pw_tx, &req).await,
-        LocateResult::InFlight => read_object_store(req, store, prefix).await.or_else(|_| {
-            Ok(FetchResponse {
+        LocateResult::InActiveBatch => {
+            let resp = read_active(pw_tx, &req).await?;
+            record_source(&topic, "memory", resp.records.len());
+            Ok(resp)
+        }
+        LocateResult::InFlight => match read_object_store(req, store, prefix).await {
+            Ok(resp) => {
+                record_source(&topic, "object_store", resp.records.len());
+                Ok(resp)
+            }
+            Err(_) => Ok(FetchResponse {
                 records: vec![],
                 hwm: -1,
-            })
-        }),
-        LocateResult::BelowInFlight => read_object_store(req, store, prefix).await,
+            }),
+        },
+        LocateResult::BelowInFlight => {
+            let resp = read_object_store(req, store, prefix).await?;
+            record_source(&topic, "object_store", resp.records.len());
+            Ok(resp)
+        }
     }
+}
+
+/// Emits `fetch.source`, incrementing by the number of records actually
+/// returned from that tier. No-op on a zero-record read (e.g. hwm hit with
+/// nothing new) so the metric reflects records served, not read attempts.
+fn record_source(topic: &str, source: &'static str, records: usize) {
+    if records == 0 {
+        return;
+    }
+    metrics::counter!(
+        FETCH_SOURCE,
+        LABEL_TOPIC => topic.to_string(),
+        LABEL_SOURCE => source
+    )
+    .increment(records as u64);
 }
 
 async fn locate(pw_tx: &mpsc::Sender<PwMsg>, from_offset: i64) -> Result<LocateResult, FetchError> {

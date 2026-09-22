@@ -5,8 +5,8 @@
 
 use crate::fetcher::{fetch, FetchRequest};
 use crate::metrics::{
-    LABEL_ERROR_CODE, LABEL_TOPIC, PRODUCE_BYTES, PRODUCE_ERRORS, PRODUCE_LATENCY_MS,
-    PRODUCE_RECORDS,
+    FETCH_BYTES, FETCH_ERRORS, FETCH_LATENCY_MS, FETCH_RECORDS, FETCH_REQUESTS, LABEL_ERROR_CODE,
+    LABEL_TOPIC, PRODUCE_BYTES, PRODUCE_ERRORS, PRODUCE_LATENCY_MS, PRODUCE_RECORDS,
 };
 use crate::partition_writer::{IncomingRecord, PwMsg};
 use crate::startup::spawn_partition;
@@ -368,11 +368,21 @@ pub async fn handle_fetch(
     state: &SharedState,
     req: kafkrs_models::wire::v1::FetchRequest,
 ) -> Frame {
+    let __start = std::time::Instant::now();
+    let __topic = req.topic.clone();
+    metrics::counter!(FETCH_REQUESTS, LABEL_TOPIC => __topic.clone()).increment(1);
+
     let handle = {
         let guard = state.partitions.read().await;
         guard.get(&(req.topic.clone(), req.partition)).cloned()
     };
     let Some(handle) = handle else {
+        metrics::counter!(
+            FETCH_ERRORS,
+            LABEL_TOPIC => __topic.clone(),
+            LABEL_ERROR_CODE => format!("{}", ErrorCode::ErrUnknownTopic as i32)
+        )
+        .increment(1);
         return Frame {
             command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
             payload: Bytes::new(),
@@ -396,8 +406,15 @@ pub async fn handle_fetch(
     let resp = match result {
         Ok(r) => r,
         Err(e) => {
+            let err_code = fetch_error_code(&e);
+            metrics::counter!(
+                FETCH_ERRORS,
+                LABEL_TOPIC => __topic.clone(),
+                LABEL_ERROR_CODE => format!("{}", err_code as i32)
+            )
+            .increment(1);
             return Frame {
-                command: make_error(correlation_id, fetch_error_code(&e), ""),
+                command: make_error(correlation_id, err_code, ""),
                 payload: Bytes::new(),
             };
         }
@@ -416,6 +433,17 @@ pub async fn handle_fetch(
         payload.extend_from_slice(&r.key);
         payload.extend_from_slice(&r.value);
     }
+    let returned_records_count = resp.records.len() as u64;
+    let returned_bytes: u64 = resp
+        .records
+        .iter()
+        .map(|r| (r.key.len() + r.value.len()) as u64)
+        .sum();
+    metrics::counter!(FETCH_RECORDS, LABEL_TOPIC => __topic.clone())
+        .increment(returned_records_count);
+    metrics::counter!(FETCH_BYTES, LABEL_TOPIC => __topic.clone()).increment(returned_bytes);
+    metrics::histogram!(FETCH_LATENCY_MS, LABEL_TOPIC => __topic.clone())
+        .record(__start.elapsed().as_secs_f64() * 1000.0);
     Frame {
         command: Command {
             correlation_id,

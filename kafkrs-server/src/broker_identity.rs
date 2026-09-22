@@ -64,8 +64,9 @@ fn resolve_broker_id(cfg_id: &Option<String>, data_dir: &Path) -> Result<String,
     // Ensure data_dir exists — fresh install / container start where the operator
     // hasn't pre-created the directory needs auto-creation. std::fs::write does
     // NOT auto-create parents.
-    std::fs::create_dir_all(data_dir)
-        .map_err(|e| IdentityError::IoError(format!("create data_dir {}: {e}", data_dir.display())))?;
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        IdentityError::IoError(format!("create data_dir {}: {e}", data_dir.display()))
+    })?;
     std::fs::write(&path, &id)
         .map_err(|e| IdentityError::IoError(format!("write {}: {e}", path.display())))?;
     Ok(id)
@@ -179,7 +180,10 @@ mod tests {
         let ident = resolve_identity(&cfg, "127.0.0.1", 5432, &missing).unwrap();
         assert!(is_valid_broker_id(&ident.broker_id));
         assert!(missing.exists(), "data_dir should have been created");
-        assert!(missing.join("broker_id").exists(), "broker_id file should exist");
+        assert!(
+            missing.join("broker_id").exists(),
+            "broker_id file should exist"
+        );
     }
 
     #[test]

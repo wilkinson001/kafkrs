@@ -1,5 +1,6 @@
 //! Partition startup logic shared between initial boot and auto-create paths.
 
+use crate::metrics::PARTITION_COUNT;
 use crate::partition_writer::PartitionWriter;
 use crate::recovery::recover_partition;
 use crate::uploader::{Uploader, UploaderMsg};
@@ -114,4 +115,5 @@ pub async fn spawn_partition(
             uploader_tx: utx,
         },
     );
+    metrics::gauge!(PARTITION_COUNT).increment(1.0);
 }

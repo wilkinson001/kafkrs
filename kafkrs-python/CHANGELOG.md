@@ -4,6 +4,10 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.5.0] — 2026-09-21
+
+Tracks the broker's 0.5.0 release. No Python API changes. See `docs/superpowers/specs/2026-09-21-metrics-design.md`.
+
 ## [0.4.0] — 2026-09-21
 
 Tracks the broker's 0.4.0 release. See `docs/superpowers/specs/2026-09-21-retention-design.md`.

@@ -97,6 +97,14 @@ impl TopicRegistry {
         } else {
             TopicRegistryFile::default()
         };
+        for t in &file.topics {
+            if let Err(e) = t.config.validate() {
+                panic!(
+                    "topics.json entry `{name}` has invalid config: {e}",
+                    name = t.name,
+                );
+            }
+        }
         let topics: HashMap<String, TopicEntry> = file
             .topics
             .into_iter()
@@ -694,5 +702,35 @@ mod tests {
         // Both fields are present in the merged result.
         assert_eq!(merged.retention_ms, Some(1000));
         assert_eq!(merged.max_fetch_wait_ms, Some(200));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "segment_size_bytes")]
+    async fn load_panics_on_invalid_topics_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+
+        // Pre-write a topics.json with an invalid config.
+        let bad = TopicRegistryFile {
+            topics: vec![TopicEntry {
+                name: "corrupt".into(),
+                uuid: "01936a80-0000-7000-8000-000000000000".into(),
+                partition_count: 1,
+                created_at_ns: 1,
+                config: TopicConfigOverrides {
+                    segment_size_bytes: Some(0),
+                    ..Default::default()
+                },
+            }],
+        };
+        std::fs::write(
+            std::path::Path::new(&dd).join("topics.json"),
+            serde_json::to_vec_pretty(&bad).unwrap(),
+        )
+        .unwrap();
+
+        let (_tx, rx) = mpsc::channel(1);
+        // This should panic with a message naming the offending field.
+        let _ = TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx);
     }
 }

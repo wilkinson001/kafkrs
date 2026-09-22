@@ -12,3 +12,11 @@ lint:
 breaking:
   use:
     - FILE
+  except:
+    # Field numbers are deliberately reserved for future RPCs (see the
+    # `reserved` comments in v1.proto) and moved out of the reserved range
+    # when we implement them — e.g. DeleteTopic taking 50/51 from the
+    # admin-RPC reservation. Buf treats that as a breaking change, but it
+    # is precisely the intended workflow.
+    - RESERVED_MESSAGE_NO_DELETE
+    - RESERVED_ENUM_NO_DELETE

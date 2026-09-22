@@ -4,6 +4,10 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.2] — 2026-09-22
+
+- Added `Client.alter_topic_config(topic, overrides) -> TopicConfigOverrides`. Partial-patch semantics matching the broker's wire semantics.
+
 ## [0.6.1] — 2026-09-22
 
 Lockstep bump. No `kafkrs-python` API changes in this release — see `kafkrs-server` 0.6.1 for the admin-port `/health` and `/ready` endpoints.

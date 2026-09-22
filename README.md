@@ -4,7 +4,7 @@ A Rust implementation of a Kafka-like streaming platform. Single-broker today, w
 
 ## Status
 
-Current release is **0.6.0** across all three crates (versioned in lockstep). Single-broker only — the wire protocol reserves field-number ranges for v1.5+ streaming-consumer and admin RPCs. The on-disk format and the wire format are both stable within a major version per the design specs; cross-version migration is not supported.
+Current release is **0.6.2** across all three crates (versioned in lockstep). Single-broker only — the wire protocol reserves field-number ranges for v1.5+ streaming-consumer and admin RPCs. The on-disk format and the wire format are both stable within a major version per the design specs; cross-version migration is not supported.
 
 ## Components
 

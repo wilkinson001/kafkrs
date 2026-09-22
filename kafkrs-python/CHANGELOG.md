@@ -4,6 +4,11 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.7.0] — 2026-09-22
+
+- Added `Client.get_metadata(topics=None) -> MetadataResponse`. Returns broker addresses and per-topic/per-partition metadata. Empty `topics` returns all; unknown topics come back with per-topic error codes.
+- `ConnectedResponse` now carries a `cluster_id` field.
+
 ## [0.6.2] — 2026-09-22
 
 - Added `Client.alter_topic_config(topic, overrides) -> TopicConfigOverrides`. Partial-patch semantics matching the broker's wire semantics.

@@ -4,6 +4,18 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.7.0] — 2026-09-22
+
+- Added `MetadataRequest` / `MetadataResponse` at oneof fields 54 / 55.
+- Added `BrokerInfo`, `TopicMetadata`, `PartitionMetadata` message types.
+- Added `ConnectedResponse.cluster_id` at field 3.
+- Shrunk the admin reserved range to `[56, 59]`; pre-reserved `[60, 79]` for future RPC categories.
+- Added `BrokerConfig.cluster_id: Option<String>` and `BrokerConfig.id: Option<String>` fields.
+
+### Breaking changes
+
+- `broker.cluster_id` is now **required** in `config.toml`. Deployments upgrading from 0.6.x must add this field before starting the 0.7.0 broker; startup panics with a clear error otherwise.
+
 ## [0.6.2] — 2026-09-22
 
 - Added `AlterTopicConfigRequest` / `AlterTopicConfigResponse` at oneof fields 52 / 53. Shrunk the admin reserved range to `[54, 59]`.

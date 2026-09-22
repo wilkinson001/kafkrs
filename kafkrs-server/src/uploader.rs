@@ -1,3 +1,9 @@
+use crate::metrics::{
+    partition_label, partition_label_with, LABEL_TRIGGER, RETENTION_BYTES_EVICTED,
+    RETENTION_DELETE_FAILURES, RETENTION_PASSES, RETENTION_SEGMENTS_EVICTED,
+    UPLOADER_BYTES_UPLOADED, UPLOADER_SEGMENTS_UPLOADED, UPLOADER_UPLOAD_LATENCY_MS,
+    UPLOADER_UPLOAD_RETRIES,
+};
 use crate::object_store::{get, manifest_key, put, segment_key};
 use crate::segment::write_segment;
 use anyhow::Result;
@@ -68,10 +74,18 @@ impl Uploader {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 UploaderMsg::Upload(batch) => {
+                    let __start = std::time::Instant::now();
+                    let __labels = partition_label(&self.topic, self.partition);
+                    let __bytes = batch
+                        .records
+                        .iter()
+                        .map(|r| (r.key.len() + r.value.len()) as u64)
+                        .sum::<u64>();
                     loop {
                         match self.upload_once(&batch).await {
                             Ok(()) => break,
                             Err(e) => {
+                                metrics::counter!(UPLOADER_UPLOAD_RETRIES, &__labels).increment(1);
                                 log::error!(
                                     "upload failed for base_offset={}: {e:?}; retrying",
                                     batch.base_offset
@@ -80,13 +94,18 @@ impl Uploader {
                             }
                         }
                     }
+                    metrics::counter!(UPLOADER_SEGMENTS_UPLOADED, &__labels).increment(1);
+                    metrics::counter!(UPLOADER_BYTES_UPLOADED, &__labels).increment(__bytes);
+                    metrics::histogram!(UPLOADER_UPLOAD_LATENCY_MS, &__labels)
+                        .record(__start.elapsed().as_secs_f64() * 1000.0);
+
                     let _ = self
                         .durable_tx
                         .send(SegmentDurable {
                             base_offset: batch.base_offset,
                         })
                         .await;
-                    if let Err(e) = self.retention_pass().await {
+                    if let Err(e) = self.retention_pass("upload").await {
                         log::warn!(
                             "retention_pass after upload failed for base_offset={}: {e:?}",
                             batch.base_offset
@@ -94,7 +113,7 @@ impl Uploader {
                     }
                 }
                 UploaderMsg::RetentionKick => {
-                    if let Err(e) = self.retention_pass().await {
+                    if let Err(e) = self.retention_pass("kick").await {
                         log::warn!("retention_pass on kick failed: {e:?}");
                     }
                 }
@@ -135,9 +154,21 @@ impl Uploader {
         Ok(())
     }
 
-    async fn retention_pass(&self) -> Result<()> {
+    async fn retention_pass(&self, trigger: &'static str) -> Result<()> {
         use crate::object_store::delete;
         use crate::retention::evaluate_eviction;
+
+        // "Passes attempted" is the useful semantic: increment before any
+        // fallible call so a failed GET below still counts as a pass.
+        metrics::counter!(
+            RETENTION_PASSES,
+            &partition_label_with(
+                &self.topic,
+                self.partition,
+                &[(LABEL_TRIGGER, trigger.to_string())]
+            )
+        )
+        .increment(1);
 
         let m_key: ObjPath = manifest_key(&self.prefix, &self.topic, self.partition);
         let raw: Bytes = get(&self.store, &m_key).await?;
@@ -151,6 +182,11 @@ impl Uploader {
         if evict.is_empty() {
             return Ok(());
         }
+
+        let __evicted_bytes: u64 = evict.iter().map(|s| s.byte_size).sum();
+        let __labels = partition_label(&self.topic, self.partition);
+        metrics::counter!(RETENTION_SEGMENTS_EVICTED, &__labels).increment(evict.len() as u64);
+        metrics::counter!(RETENTION_BYTES_EVICTED, &__labels).increment(__evicted_bytes);
 
         let evict_keys: Vec<String> = evict.iter().map(|s| s.object_key.clone()).collect();
         manifest
@@ -167,6 +203,7 @@ impl Uploader {
             let seg_key: ObjPath =
                 segment_key(&self.prefix, &self.topic, self.partition, seg.base_offset);
             if let Err(e) = delete(&self.store, &seg_key).await {
+                metrics::counter!(RETENTION_DELETE_FAILURES, &__labels).increment(1);
                 log::warn!(
                     "delete failed for segment base_offset={}: {e:?}; orphan accepted",
                     seg.base_offset

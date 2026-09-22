@@ -1,5 +1,6 @@
 pub mod config;
 pub mod fetcher;
+pub mod metrics;
 pub mod object_store;
 pub mod partition_writer;
 pub mod recovery;

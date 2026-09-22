@@ -21,6 +21,90 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+static METRICS_INIT: std::sync::Once = std::sync::Once::new();
+static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+/// Installs the global Prometheus recorder exactly once for the whole test
+/// binary (the `metrics` crate's global recorder can only be installed
+/// once per process) and returns the ephemeral port it is listening on.
+///
+/// The install is performed from a dedicated std thread that has NO
+/// ambient tokio runtime, so `PrometheusBuilder::install()` takes its
+/// fallback branch and spawns its own runtime on a background thread
+/// owned by the process — not the per-test `#[tokio::test]` runtime.
+/// Without this, the exporter future is spawned onto whichever test's
+/// runtime happened to win the race for `call_once`, and dies when
+/// that test's runtime is dropped, breaking every subsequent test.
+fn init_metrics_once() -> u16 {
+    METRICS_INIT.call_once(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<u16>();
+        std::thread::spawn(move || {
+            // Grab a random ephemeral port before init.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for port pick");
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let ports = kafkrs_models::config::PortsConfig {
+                wire: vec![0],
+                metrics: Some(port),
+            };
+            kafkrs_server::metrics::init(&ports, false).expect("metrics init");
+            tx.send(port).expect("send port");
+            // Keep this thread alive so any thread-local state the exporter
+            // relies on outlives every test in the binary. `install()` on
+            // this path spawns its own background thread with a
+            // current-thread runtime, so this thread's own lifetime
+            // doesn't strictly own the exporter — but keeping it parked
+            // is defensive against future changes.
+            std::thread::park();
+        });
+        let port = rx.recv().expect("recv port");
+        METRICS_PORT.set(port).expect("port set");
+        // Give exporter time to bind.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    });
+    *METRICS_PORT.get().expect("metrics port set")
+}
+
+/// Raw TCP HTTP scrape of `/metrics`. Sends `Connection: close` so the
+/// exporter's HTTP server closes the socket once the response is written,
+/// letting `read_to_end` return promptly instead of hanging on keep-alive.
+///
+/// The initial `TcpStream::connect` is wrapped in a bounded retry loop
+/// because `metrics::init` re-binds the exporter port asynchronously after
+/// `init_metrics_once` picks it via an ephemeral-port `TcpListener` and
+/// drops it — there is a genuine TOCTOU window between drop and re-bind
+/// during which `connect` returns `ConnectionRefused`. Up to 30 × 50ms =
+/// 1.5s of retries covers that window on loaded CI runners.
+async fn scrape_metrics(port: u16) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    let mut sock = None;
+    for _ in 0..30 {
+        match TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(s) => {
+                sock = Some(s);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("connect to metrics port {port}: {e}"),
+        }
+    }
+    let mut sock = sock.unwrap_or_else(|| panic!("metrics exporter never accepted on port {port}"));
+    sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sock.read_to_end(&mut buf),
+    )
+    .await
+    .expect("scrape timeout");
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 async fn setup_broker_no_topics(dd: &str) -> u16 {
     let store = build_store(
         &ObjectStoreConfig {
@@ -1032,4 +1116,195 @@ async fn retention_evicts_old_segments_via_sweeper() {
         }
         other => panic!("expected Error(ErrOffsetOutOfRange), got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_endpoint_serves_prometheus_text() {
+    let port = init_metrics_once();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let body = scrape_metrics(port).await;
+    assert!(body.starts_with("HTTP/1.1 200"), "got: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_produce_counter_increments() {
+    let metrics_port = init_metrics_once();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect + produce 3 records on topic "t".
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    for i in 0..3u64 {
+        let produce = Command {
+            correlation_id: 2 + i,
+            body: Some(Body::Produce(ProduceRequest {
+                topic: "t".into(),
+                partition: 0,
+                records: vec![InRecordMeta {
+                    key_len: 1,
+                    value_len: 1,
+                    schema_id: 0,
+                    timestamp_ns: 0,
+                }],
+            })),
+        };
+        sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+        let (resp, _) = read_frame(&mut sock).await;
+        assert!(matches!(resp.body, Some(Body::ProduceResp(_))));
+    }
+
+    let body = scrape_metrics(metrics_port).await;
+    // Prometheus exposition: dots become underscores.
+    assert!(
+        body.contains("messaging_kafkrs_produce_records"),
+        "produce records metric missing; body:\n{body}"
+    );
+    // Assert the counter reflects at least the 3 records produced above.
+    // Not an exact match: this test shares topic "t" and the process-global
+    // Prometheus recorder (see `init_metrics_once`) with other metrics e2e
+    // tests (e.g. `metrics_fetch_counters_increment`), which may add their
+    // own produce activity on the same topic when tests run concurrently.
+    let has_count = body.lines().any(|l| {
+        if !l.contains("messaging_kafkrs_produce_records") || !l.contains(r#"topic="t""#) {
+            return false;
+        }
+        l.trim()
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v >= 3.0)
+    });
+    assert!(has_count, "expected count >= 3 for topic=t; body:\n{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_fetch_counters_increment() {
+    let metrics_port = init_metrics_once();
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // `setup_broker` only wires up topic "t" partition 0, so we must use
+    // that topic name. This test only checks for the presence of metric
+    // families (not exact counts), so it tolerates topic="t" activity from
+    // other metrics tests sharing the process-global Prometheus recorder
+    // (see `init_metrics_once`).
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Produce one record then fetch it.
+    let produce = Command {
+        correlation_id: 2,
+        body: Some(Body::Produce(ProduceRequest {
+            topic: "t".into(),
+            partition: 0,
+            records: vec![InRecordMeta {
+                key_len: 1,
+                value_len: 1,
+                schema_id: 0,
+                timestamp_ns: 0,
+            }],
+        })),
+    };
+    sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+    let (_resp, _) = read_frame(&mut sock).await;
+
+    let fetch = Command {
+        correlation_id: 3,
+        body: Some(Body::Fetch(FetchRequest {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_records: 10,
+            max_wait_ms: 0,
+        })),
+    };
+    sock.write_all(&encode(&fetch, b"")).await.unwrap();
+    let (_resp, _) = read_frame(&mut sock).await;
+
+    let body = scrape_metrics(metrics_port).await;
+    assert!(
+        body.contains("messaging_kafkrs_fetch_requests"),
+        "fetch.requests missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("messaging_kafkrs_fetch_source"),
+        "fetch.source missing; body:\n{body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_uploader_and_retention_appear_after_produce() {
+    let metrics_port = init_metrics_once();
+    let dir = tempfile::tempdir().unwrap();
+    // setup_broker_with_retention exists from the retention feature; use tight
+    // retention to force eviction quickly.
+    let (port, _partitions) =
+        setup_broker_with_retention(dir.path().to_str().unwrap(), 200, 100).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "t".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    for i in 0..3u64 {
+        let produce = Command {
+            correlation_id: 2 + i,
+            body: Some(Body::Produce(ProduceRequest {
+                topic: "t".into(),
+                partition: 0,
+                records: vec![InRecordMeta {
+                    key_len: 1,
+                    value_len: 1,
+                    schema_id: 0,
+                    timestamp_ns: 0,
+                }],
+            })),
+        };
+        sock.write_all(&encode(&produce, b"kv")).await.unwrap();
+        let (_resp, _) = read_frame(&mut sock).await;
+    }
+    // Wait past retention to trigger eviction.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    let body = scrape_metrics(metrics_port).await;
+    assert!(
+        body.contains("kafkrs_uploader_segments_uploaded"),
+        "uploader.segments_uploaded missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("kafkrs_retention_passes"),
+        "retention.passes missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("kafkrs_retention_sweep_kicks_sent"),
+        "retention.sweep_kicks_sent missing; body:\n{body}"
+    );
 }

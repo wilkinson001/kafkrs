@@ -4,6 +4,23 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.5.0] — 2026-09-21
+
+Breaking config schema change to support the new metrics endpoint. See `docs/superpowers/specs/2026-09-21-metrics-design.md`.
+
+### Changed
+- **BREAKING**: `Config.ports: Vec<u16>` at the top level is replaced by `Config.ports: PortsConfig`. New TOML shape:
+  ```toml
+  [ports]
+  wire = [5432]
+  metrics = 9464    # optional; omit to disable /metrics
+  ```
+  Old `ports = [5432]` at the top level no longer parses; existing `config.toml` files must be updated.
+
+### Added
+- `PortsConfig { wire: Vec<u16>, metrics: Option<u16> }` on `Config`.
+- `BrokerConfig.metrics_high_cardinality: bool` (default `false`) — enables per-partition labels on hot-path metrics.
+
 ## [0.4.0] — 2026-09-21
 
 Retention support lands. Additive proto change; see `docs/superpowers/specs/2026-09-21-retention-design.md`.

@@ -4,6 +4,11 @@
 //! no Connect-state tracking).
 
 use crate::fetcher::{fetch, FetchRequest};
+use crate::metrics::{
+    partition_label, partition_label_with, FETCH_BYTES, FETCH_ERRORS, FETCH_LATENCY_MS,
+    FETCH_RECORDS, FETCH_REQUESTS, LABEL_ERROR_CODE, PRODUCE_BYTES, PRODUCE_ERRORS,
+    PRODUCE_LATENCY_MS, PRODUCE_RECORDS,
+};
 use crate::partition_writer::{IncomingRecord, PwMsg};
 use crate::startup::spawn_partition;
 use crate::topic_registry::{RegistryError, RegistryMsg};
@@ -93,7 +98,21 @@ pub async fn handle_produce(
     records_meta: Vec<kafkrs_models::wire::v1::InRecordMeta>,
     payload: Bytes,
 ) -> Frame {
+    let __start = std::time::Instant::now();
+
     if records_meta.is_empty() {
+        metrics::counter!(
+            PRODUCE_ERRORS,
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                )],
+            )
+        )
+        .increment(1);
         return Frame {
             command: make_error(
                 correlation_id,
@@ -117,6 +136,18 @@ pub async fn handle_produce(
             .await
             .is_err()
         {
+            metrics::counter!(
+                PRODUCE_ERRORS,
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                    )],
+                )
+            )
+            .increment(1);
             return Frame {
                 command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
                 payload: Bytes::new(),
@@ -149,6 +180,18 @@ pub async fn handle_produce(
                 // spawned by a prior CreateTopic or EnsureExists call. Nothing to do.
             }
             Ok(Err(RegistryError::Io(msg))) => {
+                metrics::counter!(
+                    PRODUCE_ERRORS,
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrInternal as i32)
+                        )],
+                    )
+                )
+                .increment(1);
                 return Frame {
                     command: make_error(
                         correlation_id,
@@ -159,6 +202,18 @@ pub async fn handle_produce(
                 };
             }
             Err(_) => {
+                metrics::counter!(
+                    PRODUCE_ERRORS,
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                        )],
+                    )
+                )
+                .increment(1);
                 return Frame {
                     command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
                     payload: Bytes::new(),
@@ -173,6 +228,18 @@ pub async fn handle_produce(
         guard.get(&(topic.clone(), partition)).cloned()
     };
     let Some(handle) = handle else {
+        metrics::counter!(
+            PRODUCE_ERRORS,
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrUnknownTopic as i32)
+                )],
+            )
+        )
+        .increment(1);
         return Frame {
             command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
             payload: Bytes::new(),
@@ -182,6 +249,18 @@ pub async fn handle_produce(
     // Per-record size check against the resolved per-topic limits.
     for m in &records_meta {
         if m.key_len > handle.cfg.max_key_size_bytes {
+            metrics::counter!(
+                PRODUCE_ERRORS,
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrKeyTooLarge as i32)
+                    )],
+                )
+            )
+            .increment(1);
             return Frame {
                 command: make_error(
                     correlation_id,
@@ -195,6 +274,18 @@ pub async fn handle_produce(
             };
         }
         if m.value_len > handle.cfg.max_value_size_bytes {
+            metrics::counter!(
+                PRODUCE_ERRORS,
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrRecordTooLarge as i32)
+                    )],
+                )
+            )
+            .increment(1);
             return Frame {
                 command: make_error(
                     correlation_id,
@@ -216,6 +307,18 @@ pub async fn handle_produce(
         let kl = m.key_len as usize;
         let vl = m.value_len as usize;
         if cursor + kl + vl > payload.len() {
+            metrics::counter!(
+                PRODUCE_ERRORS,
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                    )],
+                )
+            )
+            .increment(1);
             return Frame {
                 command: make_error(
                     correlation_id,
@@ -236,6 +339,18 @@ pub async fn handle_produce(
         });
     }
     if cursor != payload.len() {
+        metrics::counter!(
+            PRODUCE_ERRORS,
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
+                )],
+            )
+        )
+        .increment(1);
         return Frame {
             command: make_error(
                 correlation_id,
@@ -246,6 +361,11 @@ pub async fn handle_produce(
         };
     }
 
+    let __topic = topic.clone();
+    let __bytes: u64 = records_meta
+        .iter()
+        .map(|m| (m.key_len + m.value_len) as u64)
+        .sum();
     let n = records.len() as i64;
     let (ack, ack_rx) = oneshot::channel::<i64>();
     if handle
@@ -254,27 +374,60 @@ pub async fn handle_produce(
         .await
         .is_err()
     {
+        metrics::counter!(
+            PRODUCE_ERRORS,
+            &partition_label_with(
+                &topic,
+                partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                )],
+            )
+        )
+        .increment(1);
         return Frame {
             command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
             payload: Bytes::new(),
         };
     }
     match ack_rx.await {
-        Ok(hwm) => Frame {
-            command: Command {
-                correlation_id,
-                body: Some(Body::ProduceResp(ProduceResponse {
-                    base_offset: hwm - n + 1,
-                    last_offset: hwm,
-                    hwm,
-                })),
-            },
-            payload: Bytes::new(),
-        },
-        Err(_) => Frame {
-            command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-            payload: Bytes::new(),
-        },
+        Ok(hwm) => {
+            let __labels = partition_label(&__topic, partition);
+            metrics::counter!(PRODUCE_RECORDS, &__labels).increment(n as u64);
+            metrics::counter!(PRODUCE_BYTES, &__labels).increment(__bytes);
+            metrics::histogram!(PRODUCE_LATENCY_MS, &__labels)
+                .record(__start.elapsed().as_secs_f64() * 1000.0);
+            Frame {
+                command: Command {
+                    correlation_id,
+                    body: Some(Body::ProduceResp(ProduceResponse {
+                        base_offset: hwm - n + 1,
+                        last_offset: hwm,
+                        hwm,
+                    })),
+                },
+                payload: Bytes::new(),
+            }
+        }
+        Err(_) => {
+            metrics::counter!(
+                PRODUCE_ERRORS,
+                &partition_label_with(
+                    &topic,
+                    partition,
+                    &[(
+                        LABEL_ERROR_CODE,
+                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
+                    )],
+                )
+            )
+            .increment(1);
+            Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            }
+        }
     }
 }
 
@@ -283,11 +436,28 @@ pub async fn handle_fetch(
     state: &SharedState,
     req: kafkrs_models::wire::v1::FetchRequest,
 ) -> Frame {
+    let __start = std::time::Instant::now();
+    let __topic = req.topic.clone();
+    let __partition = req.partition;
+    metrics::counter!(FETCH_REQUESTS, &partition_label(&__topic, __partition)).increment(1);
+
     let handle = {
         let guard = state.partitions.read().await;
         guard.get(&(req.topic.clone(), req.partition)).cloned()
     };
     let Some(handle) = handle else {
+        metrics::counter!(
+            FETCH_ERRORS,
+            &partition_label_with(
+                &__topic,
+                __partition,
+                &[(
+                    LABEL_ERROR_CODE,
+                    format!("{}", ErrorCode::ErrUnknownTopic as i32)
+                )],
+            )
+        )
+        .increment(1);
         return Frame {
             command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
             payload: Bytes::new(),
@@ -311,8 +481,18 @@ pub async fn handle_fetch(
     let resp = match result {
         Ok(r) => r,
         Err(e) => {
+            let err_code = fetch_error_code(&e);
+            metrics::counter!(
+                FETCH_ERRORS,
+                &partition_label_with(
+                    &__topic,
+                    __partition,
+                    &[(LABEL_ERROR_CODE, format!("{}", err_code as i32))],
+                )
+            )
+            .increment(1);
             return Frame {
-                command: make_error(correlation_id, fetch_error_code(&e), ""),
+                command: make_error(correlation_id, err_code, ""),
                 payload: Bytes::new(),
             };
         }
@@ -331,6 +511,17 @@ pub async fn handle_fetch(
         payload.extend_from_slice(&r.key);
         payload.extend_from_slice(&r.value);
     }
+    let returned_records_count = resp.records.len() as u64;
+    let returned_bytes: u64 = resp
+        .records
+        .iter()
+        .map(|r| (r.key.len() + r.value.len()) as u64)
+        .sum();
+    let __labels = partition_label(&__topic, __partition);
+    metrics::counter!(FETCH_RECORDS, &__labels).increment(returned_records_count);
+    metrics::counter!(FETCH_BYTES, &__labels).increment(returned_bytes);
+    metrics::histogram!(FETCH_LATENCY_MS, &__labels)
+        .record(__start.elapsed().as_secs_f64() * 1000.0);
     Frame {
         command: Command {
             correlation_id,

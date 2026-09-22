@@ -43,8 +43,10 @@ def _write_config(tmp: Path, port: int) -> Path:
     cfg.write_text(
         f"""
 address = "127.0.0.1"
-ports = [{port}]
 data_dir = "{data_dir.as_posix()}"
+
+[ports]
+wire = [{port}]
 
 [broker]
 disk_type = "nvme"
@@ -144,8 +146,10 @@ def _write_config_no_auto_create(tmp: Path, port: int) -> Path:
     cfg.write_text(
         f"""
 address = "127.0.0.1"
-ports = [{port}]
 data_dir = "{data_dir.as_posix()}"
+
+[ports]
+wire = [{port}]
 
 [broker]
 disk_type = "nvme"

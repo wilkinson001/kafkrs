@@ -4,6 +4,30 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.5.0] — 2026-09-21
+
+Broker metrics: a Prometheus scrape endpoint exposing 32 metrics across produce, fetch, uploader, retention, partition state, runtime, and wire subsystems. Semantic conventions follow OpenTelemetry `messaging.*` where applicable; call sites are exporter-agnostic via the `metrics` crate façade so future OTLP push is a config swap. Metric names and label keys are defined as `pub const` items in `kafkrs-server::metrics` so future renames are one-edit changes. See `docs/superpowers/specs/2026-09-21-metrics-design.md`.
+
+**Behaviour change:** none by default. Metrics are off unless operators set `ports.metrics` in `config.toml`. No new port is bound on upgrade unless explicitly enabled.
+
+### Added
+- `metrics` module with `init(&PortsConfig, bool)`, `partition_label`, `LATENCY_BUCKETS_MS`, and `describe_all`.
+- 32 metrics: `messaging.kafkrs.produce.{records,bytes,latency_ms,errors}`, `messaging.kafkrs.fetch.{requests,records,bytes,latency_ms,long_poll_wait_ms,source,errors}`, `kafkrs.uploader.{segments_uploaded,bytes_uploaded,upload_latency_ms,upload_retries}`, `kafkrs.retention.{segments_evicted,bytes_evicted,passes,delete_failures,sweep_kicks_sent,sweep_kicks_dropped}`, `kafkrs.partition.{count,records_in_memory,bytes_in_memory,segments_uploaded,hwm_offset,wal_files}`, `kafkrs.runtime.{uptime_seconds,build_info}`, `kafkrs.wire.{connections_active,connections_accepted,rpc_requests}`. All names defined as `pub const` items in `kafkrs-server::metrics`.
+- Per-partition labels behind `broker.metrics_high_cardinality` opt-in.
+- New crate dependencies: `metrics = "0.24"`, `metrics-exporter-prometheus = "0.16"`.
+- `KAFKRS_GIT_SHA` compile-time env var support for `kafkrs.runtime.build_info` label (defaults to `"unknown"` when unset).
+
+### Changed
+- **BREAKING (config)**: `Config.ports: Vec<u16>` becomes `Config.ports: PortsConfig`. See kafkrs-models 0.5.0 for details.
+- `main.rs` calls `metrics::init` before spawning subsystems.
+- `Uploader::retention_pass` gains a `trigger: &'static str` parameter used to label `kafkrs.retention.passes`.
+
+### Not implemented
+- Native OTLP push exporter (deferred; swap `metrics-exporter-prometheus` for `metrics-exporter-opentelemetry` when needed).
+- Distributed traces (`tracing` + `tracing-opentelemetry`; separate spec).
+- `/health` endpoint (trivial add on the same admin port when driver appears).
+- Native/sparse Prometheus histograms.
+
 ## [0.4.0] — 2026-09-21
 
 Retention support: time-based and size-based deletion of uploaded Parquet segments, per-topic. See `docs/superpowers/specs/2026-09-21-retention-design.md`.

@@ -8,6 +8,10 @@
 //! - Writer: drains a response-Command mpsc and writes one frame at a time so
 //!   no two responses interleave bytes on the socket.
 
+use crate::metrics::{
+    LABEL_ERROR_CODE, LABEL_RPC, WIRE_CONNECTIONS_ACCEPTED, WIRE_CONNECTIONS_ACTIVE,
+    WIRE_RPC_REQUESTS,
+};
 use crate::wire::dispatch::{
     handle_connected, handle_create_topic, handle_describe_topic, handle_fetch, handle_list_topics,
     handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
@@ -29,6 +33,39 @@ use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 const CONNECTION_RESPONSE_BUFFER: usize = 256;
 const CONNECTION_REQUEST_BUFFER: usize = 256;
 
+/// Increment `WIRE_RPC_REQUESTS` for one RPC. Called from every branch of
+/// the connection state machine that produces a response — including the
+/// Connect handshake and pre-Connect/malformed-frame paths that never reach
+/// `dispatch_one`. `err_code = 0` denotes success.
+fn count_rpc(rpc: &'static str, err_code: i32) {
+    metrics::counter!(
+        WIRE_RPC_REQUESTS,
+        LABEL_RPC => rpc,
+        LABEL_ERROR_CODE => err_code.to_string()
+    )
+    .increment(1);
+}
+
+/// Tracks a connection's lifetime for the `connections_active` gauge.
+/// Increments the accepted counter and active gauge on construction;
+/// decrements the active gauge on drop so the gauge stays balanced on
+/// both graceful and panic-driven task exits.
+struct ConnectionGuard;
+
+impl ConnectionGuard {
+    fn new() -> Self {
+        metrics::counter!(WIRE_CONNECTIONS_ACCEPTED).increment(1);
+        metrics::gauge!(WIRE_CONNECTIONS_ACTIVE).increment(1.0);
+        ConnectionGuard
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(WIRE_CONNECTIONS_ACTIVE).decrement(1.0);
+    }
+}
+
 /// Accept loop bound to one TCP listener. Spawns one connection task per
 /// accepted socket. Replaces the loop in `main.rs` that called
 /// `Listener::new(...).process()`.
@@ -39,6 +76,7 @@ pub async fn accept_loop(listener: TcpListener, state: SharedState) {
                 debug!("accepted connection from {peer}");
                 let st = state.clone();
                 tokio::spawn(async move {
+                    let _guard = ConnectionGuard::new();
                     run_connection(socket, st).await;
                     debug!("connection {peer} closed");
                 });
@@ -127,12 +165,14 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
         let cid = frame.command.correlation_id;
         // Malformed-frame sentinel from the reader: forward to writer and exit.
         if matches!(frame.command.body, Some(Body::Error(_))) {
+            count_rpc("unknown", ErrorCode::ErrMalformedFrame as i32);
             let _ = resp_tx.send(frame).await;
             break;
         }
         match (connected, frame.command.body.clone()) {
             (false, Some(Body::Connect(req))) => {
                 if req.protocol_version != PROTOCOL_VERSION {
+                    count_rpc("connect", ErrorCode::ErrUnsupportedProtocolVersion as i32);
                     let _ = resp_tx
                         .send(Frame {
                             command: make_error(
@@ -148,10 +188,12 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                         .await;
                     break;
                 }
+                count_rpc("connect", 0);
                 let _ = resp_tx.send(handle_connected(cid)).await;
                 connected = true;
             }
             (false, _) => {
+                count_rpc("connect", ErrorCode::ErrHandshakeRequired as i32);
                 let _ = resp_tx
                     .send(Frame {
                         command: make_error(
@@ -165,6 +207,7 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                 break;
             }
             (true, Some(Body::Connect(_))) => {
+                count_rpc("connect", ErrorCode::ErrAlreadyConnected as i32);
                 let _ = resp_tx
                     .send(Frame {
                         command: make_error(cid, ErrorCode::ErrAlreadyConnected, ""),
@@ -187,6 +230,7 @@ async fn run_connection(socket: tokio::net::TcpStream, state: SharedState) {
                 inflight.lock().unwrap().insert(cid, join.abort_handle());
             }
             (true, None) => {
+                count_rpc("unknown", ErrorCode::ErrInvalidCommand as i32);
                 let _ = resp_tx
                     .send(Frame {
                         command: make_error(
@@ -218,7 +262,16 @@ async fn dispatch_one(
     payload: Bytes,
     state: &SharedState,
 ) -> Frame {
-    match body {
+    let __rpc = match &body {
+        Body::Ping(_) => "ping",
+        Body::Produce(_) => "produce",
+        Body::Fetch(_) => "fetch",
+        Body::CreateTopic(_) => "create_topic",
+        Body::DescribeTopic(_) => "describe_topic",
+        Body::ListTopics(_) => "list_topics",
+        _ => "unknown",
+    };
+    let response = match body {
         Body::Ping(_) => handle_ping(correlation_id),
         Body::Produce(req) => {
             handle_produce(
@@ -252,5 +305,11 @@ async fn dispatch_one(
             ),
             payload: Bytes::new(),
         },
-    }
+    };
+    let __err_code = match &response.command.body {
+        Some(Body::Error(e)) => e.code,
+        _ => 0,
+    };
+    count_rpc(__rpc, __err_code);
+    response
 }

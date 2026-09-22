@@ -1,5 +1,6 @@
 //! Partition startup logic shared between initial boot and auto-create paths.
 
+use crate::metrics::{LABEL_TOPIC, PARTITION_COUNT, PARTITION_WAL_FILES};
 use crate::partition_writer::PartitionWriter;
 use crate::recovery::recover_partition;
 use crate::uploader::{Uploader, UploaderMsg};
@@ -68,7 +69,11 @@ pub async fn spawn_partition(
     ) = mpsc::channel(256);
     let (tail, _): (broadcast::Sender<i64>, broadcast::Receiver<i64>) = broadcast::channel(1024);
 
-    // Re-queue orphan sealed segments for upload.
+    // Re-queue orphan sealed segments for upload. Each orphan is backed by a
+    // pre-existing .wal file on disk; account for them in the wal_files gauge
+    // so per-orphan `on_durable` decrements balance out (PartitionWriter::new
+    // only accounts for the freshly-opened active-segment WAL).
+    let orphan_count: usize = rec.orphan_segments.len();
     for (base, records) in rec.orphan_segments {
         let last = records.last().unwrap();
         let _ = utx
@@ -80,6 +85,10 @@ pub async fn spawn_partition(
                 records,
             }))
             .await;
+    }
+    if orphan_count > 0 {
+        metrics::gauge!(PARTITION_WAL_FILES, LABEL_TOPIC => topic.to_string())
+            .increment(orphan_count as f64);
     }
 
     let pw = PartitionWriter::new(
@@ -114,4 +123,5 @@ pub async fn spawn_partition(
             uploader_tx: utx,
         },
     );
+    metrics::gauge!(PARTITION_COUNT).increment(1.0);
 }

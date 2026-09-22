@@ -30,6 +30,10 @@ async fn main() {
         .unwrap_or_else(|| "./config.toml".to_string());
     let cfg: kafkrs_models::config::Config = config::load_config(config_path);
 
+    kafkrs_server::metrics::init(&cfg.ports, cfg.broker.metrics_high_cardinality)
+        .expect("metrics init");
+    tokio::spawn(kafkrs_server::metrics::uptime_updater());
+
     let store: Arc<dyn ::object_store::ObjectStore> =
         build_store(&cfg.object_store, &cfg.data_dir).expect("object store");
     let prefix: String = cfg.object_store.prefix.clone();
@@ -89,7 +93,7 @@ async fn main() {
         Duration::from_millis(cfg.broker.retention_sweep_interval_ms.unwrap_or(60_000));
     tokio::spawn(RetentionSweeper::new(partitions.clone(), sweep_interval).run());
 
-    for port in cfg.ports.clone() {
+    for port in cfg.ports.wire.clone() {
         let addr: String = format!("{}:{}", cfg.address, port);
         let listener: TcpListener = TcpListener::bind(&addr).await.expect("bind");
         info!("Listening on {addr}");

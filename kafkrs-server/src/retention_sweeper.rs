@@ -2,6 +2,7 @@
 //! known partition, enqueues an UploaderMsg::RetentionKick so idle partitions
 //! (those not currently receiving writes) still evict expired segments.
 
+use crate::metrics::{RETENTION_SWEEP_KICKS_DROPPED, RETENTION_SWEEP_KICKS_SENT};
 use crate::uploader::UploaderMsg;
 use crate::wire::PartitionHandle;
 use std::collections::HashMap;
@@ -41,7 +42,14 @@ impl RetentionSweeper {
             for tx in snapshot {
                 // Best-effort; drop the kick if the Uploader is busy.
                 // Retention is idempotent so lost kicks are harmless.
-                let _ = tx.try_send(UploaderMsg::RetentionKick);
+                match tx.try_send(UploaderMsg::RetentionKick) {
+                    Ok(_) => {
+                        metrics::counter!(RETENTION_SWEEP_KICKS_SENT).increment(1);
+                    }
+                    Err(_) => {
+                        metrics::counter!(RETENTION_SWEEP_KICKS_DROPPED).increment(1);
+                    }
+                }
             }
         }
     }

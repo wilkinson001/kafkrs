@@ -1,3 +1,4 @@
+pub mod broker_identity;
 pub mod config;
 pub mod deletion;
 pub mod fetcher;

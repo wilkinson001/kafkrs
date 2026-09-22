@@ -48,6 +48,17 @@ pub enum RegistryMsg {
         delete_data: bool,
         reply: oneshot::Sender<Result<(), RegistryError>>,
     },
+    /// Merge a partial-patch of `TopicConfigOverrides` onto the topic's
+    /// current config, validate the merged result, and persist to
+    /// `topics.json` atomically. Returns the merged overrides so the
+    /// caller can resolve them + push `UpdateConfig` messages to running
+    /// actors. Persist-first: `topics.json` is fsync'd before the reply
+    /// fires (spec invariant 1).
+    Alter {
+        name: String,
+        patch: TopicConfigOverrides,
+        reply: oneshot::Sender<Result<TopicConfigOverrides, RegistryError>>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -55,6 +66,7 @@ pub enum RegistryError {
     AlreadyExists,
     Io(String),
     UnknownTopic,
+    InvalidConfig(String),
 }
 
 pub struct TopicRegistry {
@@ -85,6 +97,14 @@ impl TopicRegistry {
         } else {
             TopicRegistryFile::default()
         };
+        for t in &file.topics {
+            if let Err(e) = t.config.validate() {
+                panic!(
+                    "topics.json entry `{name}` has invalid config: {e}",
+                    name = t.name,
+                );
+            }
+        }
         let topics: HashMap<String, TopicEntry> = file
             .topics
             .into_iter()
@@ -143,6 +163,9 @@ impl TopicRegistry {
                 } => {
                     let _ = reply.send(self.delete(&name).await);
                 }
+                RegistryMsg::Alter { name, patch, reply } => {
+                    let _ = reply.send(self.alter(&name, patch).await);
+                }
             }
         }
     }
@@ -172,6 +195,9 @@ impl TopicRegistry {
         partition_count: u32,
         overrides: TopicConfigOverrides,
     ) -> Result<String, RegistryError> {
+        if let Err(e) = overrides.validate() {
+            return Err(RegistryError::InvalidConfig(e.to_string()));
+        }
         if self.topics.contains_key(name) {
             return Err(RegistryError::AlreadyExists);
         }
@@ -211,6 +237,74 @@ impl TopicRegistry {
         let uuid: String = entry.uuid.clone();
         self.topics.insert(name.to_string(), entry);
         Ok(uuid)
+    }
+
+    async fn alter(
+        &mut self,
+        name: &str,
+        patch: TopicConfigOverrides,
+    ) -> Result<TopicConfigOverrides, RegistryError> {
+        let Some(entry) = self.topics.get(name).cloned() else {
+            return Err(RegistryError::UnknownTopic);
+        };
+
+        // Merge patch onto current config.
+        let mut merged = entry.config.clone();
+        if let Some(v) = patch.segment_size_bytes {
+            merged.segment_size_bytes = Some(v);
+        }
+        if let Some(v) = patch.segment_seal_time_ms {
+            merged.segment_seal_time_ms = Some(v);
+        }
+        if let Some(v) = patch.max_key_size_bytes {
+            merged.max_key_size_bytes = Some(v);
+        }
+        if let Some(v) = patch.max_value_size_bytes {
+            merged.max_value_size_bytes = Some(v);
+        }
+        if let Some(v) = patch.group_commit_time_ms {
+            merged.group_commit_time_ms = Some(v);
+        }
+        if let Some(v) = patch.group_commit_size_bytes {
+            merged.group_commit_size_bytes = Some(v);
+        }
+        if let Some(v) = patch.group_commit_record_count {
+            merged.group_commit_record_count = Some(v);
+        }
+        if let Some(v) = patch.max_fetch_wait_ms {
+            merged.max_fetch_wait_ms = Some(v);
+        }
+        if let Some(v) = patch.retention_ms {
+            merged.retention_ms = Some(v);
+        }
+        if let Some(v) = patch.retention_bytes {
+            merged.retention_bytes = Some(v);
+        }
+
+        // Validate BEFORE touching in-memory state.
+        if let Err(e) = merged.validate() {
+            return Err(RegistryError::InvalidConfig(e.to_string()));
+        }
+
+        // Swap in-memory config, then persist. On IO failure, roll back so
+        // topics.json and in-memory state stay consistent.
+        let prev_config = entry.config.clone();
+        let mut new_entry = entry;
+        new_entry.config = merged.clone();
+        self.topics.insert(name.to_string(), new_entry);
+
+        let next = TopicRegistryFile {
+            topics: self.topics.values().cloned().collect(),
+        };
+        if let Err(e) = atomic_write_registry(&self.data_dir, &next) {
+            // Roll back the in-memory swap.
+            if let Some(t) = self.topics.get_mut(name) {
+                t.config = prev_config;
+            }
+            return Err(RegistryError::Io(e.to_string()));
+        }
+
+        Ok(merged)
     }
 }
 
@@ -418,5 +512,225 @@ mod tests {
         assert_eq!(entry.name, "orders");
         let parsed_uuid = Uuid::parse_str(&entry.uuid).expect("valid UUID");
         assert_eq!(parsed_uuid.get_version(), Some(uuid::Version::SortRand)); // v7
+    }
+
+    #[tokio::test]
+    async fn create_rejects_invalid_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
+        tokio::spawn(reg.run());
+
+        let (r, rr) = oneshot::channel();
+        tx.send(RegistryMsg::Create {
+            name: "bad".into(),
+            partition_count: 1,
+            overrides: TopicConfigOverrides {
+                segment_size_bytes: Some(0),
+                ..Default::default()
+            },
+            reply: r,
+        })
+        .await
+        .unwrap();
+        match rr.await.unwrap() {
+            Err(RegistryError::InvalidConfig(msg)) => {
+                assert!(msg.contains("segment_size_bytes"), "got: {msg}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn alter_unknown_topic_returns_unknown_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
+        tokio::spawn(reg.run());
+
+        let (r, rr) = oneshot::channel();
+        tx.send(RegistryMsg::Alter {
+            name: "nope".into(),
+            patch: TopicConfigOverrides::default(),
+            reply: r,
+        })
+        .await
+        .unwrap();
+        assert_eq!(rr.await.unwrap().unwrap_err(), RegistryError::UnknownTopic);
+    }
+
+    #[tokio::test]
+    async fn alter_invalid_patch_returns_invalid_config_and_leaves_state_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg = TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
+            .unwrap();
+        tokio::spawn(reg.run());
+
+        // Create with valid config.
+        let (r1, rr1) = oneshot::channel();
+        tx.send(RegistryMsg::Create {
+            name: "t".into(),
+            partition_count: 1,
+            overrides: TopicConfigOverrides::default(),
+            reply: r1,
+        })
+        .await
+        .unwrap();
+        rr1.await.unwrap().unwrap();
+
+        // Alter with an invalid patch.
+        let (r2, rr2) = oneshot::channel();
+        tx.send(RegistryMsg::Alter {
+            name: "t".into(),
+            patch: TopicConfigOverrides {
+                segment_size_bytes: Some(0),
+                ..Default::default()
+            },
+            reply: r2,
+        })
+        .await
+        .unwrap();
+        match rr2.await.unwrap() {
+            Err(RegistryError::InvalidConfig(msg)) => {
+                assert!(msg.contains("segment_size_bytes"), "got: {msg}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+
+        // Re-read topics.json and confirm on-disk config is untouched.
+        let raw = std::fs::read_to_string(std::path::Path::new(&dd).join("topics.json")).unwrap();
+        let parsed: TopicRegistryFile = serde_json::from_str(&raw).unwrap();
+        let entry = parsed.topics.iter().find(|t| t.name == "t").unwrap();
+        assert_eq!(entry.config.segment_size_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn alter_valid_patch_persists_and_returns_merged_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg = TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
+            .unwrap();
+        tokio::spawn(reg.run());
+
+        let (r1, rr1) = oneshot::channel();
+        tx.send(RegistryMsg::Create {
+            name: "t".into(),
+            partition_count: 1,
+            overrides: TopicConfigOverrides::default(),
+            reply: r1,
+        })
+        .await
+        .unwrap();
+        rr1.await.unwrap().unwrap();
+
+        let (r2, rr2) = oneshot::channel();
+        tx.send(RegistryMsg::Alter {
+            name: "t".into(),
+            patch: TopicConfigOverrides {
+                retention_ms: Some(60_000),
+                ..Default::default()
+            },
+            reply: r2,
+        })
+        .await
+        .unwrap();
+        let merged = rr2.await.unwrap().unwrap();
+        assert_eq!(merged.retention_ms, Some(60_000));
+        assert_eq!(merged.segment_size_bytes, None);
+
+        let raw = std::fs::read_to_string(std::path::Path::new(&dd).join("topics.json")).unwrap();
+        let parsed: TopicRegistryFile = serde_json::from_str(&raw).unwrap();
+        let entry = parsed.topics.iter().find(|t| t.name == "t").unwrap();
+        assert_eq!(entry.config.retention_ms, Some(60_000));
+    }
+
+    #[tokio::test]
+    async fn alter_second_patch_composes_on_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg = TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
+            .unwrap();
+        tokio::spawn(reg.run());
+
+        let (r1, rr1) = oneshot::channel();
+        tx.send(RegistryMsg::Create {
+            name: "t".into(),
+            partition_count: 1,
+            overrides: TopicConfigOverrides::default(),
+            reply: r1,
+        })
+        .await
+        .unwrap();
+        rr1.await.unwrap().unwrap();
+
+        // First patch: only retention_ms.
+        let (r2, rr2) = oneshot::channel();
+        tx.send(RegistryMsg::Alter {
+            name: "t".into(),
+            patch: TopicConfigOverrides {
+                retention_ms: Some(1000),
+                ..Default::default()
+            },
+            reply: r2,
+        })
+        .await
+        .unwrap();
+        rr2.await.unwrap().unwrap();
+
+        // Second patch: only max_fetch_wait_ms.
+        let (r3, rr3) = oneshot::channel();
+        tx.send(RegistryMsg::Alter {
+            name: "t".into(),
+            patch: TopicConfigOverrides {
+                max_fetch_wait_ms: Some(200),
+                ..Default::default()
+            },
+            reply: r3,
+        })
+        .await
+        .unwrap();
+        let merged = rr3.await.unwrap().unwrap();
+
+        // Both fields are present in the merged result.
+        assert_eq!(merged.retention_ms, Some(1000));
+        assert_eq!(merged.max_fetch_wait_ms, Some(200));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "segment_size_bytes")]
+    async fn load_panics_on_invalid_topics_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+
+        // Pre-write a topics.json with an invalid config.
+        let bad = TopicRegistryFile {
+            topics: vec![TopicEntry {
+                name: "corrupt".into(),
+                uuid: "01936a80-0000-7000-8000-000000000000".into(),
+                partition_count: 1,
+                created_at_ns: 1,
+                config: TopicConfigOverrides {
+                    segment_size_bytes: Some(0),
+                    ..Default::default()
+                },
+            }],
+        };
+        std::fs::write(
+            std::path::Path::new(&dd).join("topics.json"),
+            serde_json::to_vec_pretty(&bad).unwrap(),
+        )
+        .unwrap();
+
+        let (_tx, rx) = mpsc::channel(1);
+        // This should panic with a message naming the offending field.
+        let _ = TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx);
     }
 }

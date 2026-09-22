@@ -208,6 +208,31 @@ pub async fn handle_produce(
                     payload: Bytes::new(),
                 };
             }
+            Ok(Err(RegistryError::InvalidConfig(_))) => {
+                // EnsureExists always passes TopicConfigOverrides::default(),
+                // which is always valid; unreachable in practice, but the
+                // shared RegistryError type requires this arm to be exhaustive.
+                metrics::counter!(
+                    PRODUCE_ERRORS,
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrInternal as i32)
+                        )],
+                    )
+                )
+                .increment(1);
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        ErrorCode::ErrInternal,
+                        "auto-create failed: unexpected InvalidConfig",
+                    ),
+                    payload: Bytes::new(),
+                };
+            }
             Ok(Err(RegistryError::Io(msg))) => {
                 metrics::counter!(
                     PRODUCE_ERRORS,
@@ -888,6 +913,98 @@ pub async fn handle_delete_topic(
         command: Command {
             correlation_id,
             body: Some(Body::DeleteTopicResp(DeleteTopicResponse {})),
+        },
+        payload: Bytes::new(),
+    }
+}
+
+pub async fn handle_alter_topic_config(
+    correlation_id: u64,
+    state: &SharedState,
+    req: kafkrs_models::wire::v1::AlterTopicConfigRequest,
+) -> Frame {
+    let topic = req.topic.clone();
+    let patch = wire_overrides_to_model(req.overrides.unwrap_or_default());
+
+    // Registry does merge + validate + persist. On success it returns the
+    // fully-merged overrides so we can resolve them for the actors.
+    let (tx, rx) = oneshot::channel::<Result<TopicConfigOverridesModel, RegistryError>>();
+    if state
+        .registry
+        .send(RegistryMsg::Alter {
+            name: topic.clone(),
+            patch,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return Frame {
+            command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+            payload: Bytes::new(),
+        };
+    }
+    let merged = match rx.await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            return Frame {
+                command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
+                payload: Bytes::new(),
+            };
+        }
+        Err(_) => {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+    };
+
+    // Resolve merged overrides against the broker's disk profile so the
+    // actors can just swap their `cfg` field.
+    let new_cfg = ResolvedTopicConfig::resolve(&merged, state.disk_type.clone());
+
+    // Snapshot the handles under a read lock (do NOT hold across the mpsc
+    // sends). A DeleteTopic that races removes the entry; the send fails
+    // silently. An auto-create that races spawns actors from the
+    // already-persisted new config in topics.json, so they start correct.
+    let handles: Vec<PartitionHandle> = {
+        let guard = state.partitions.read().await;
+        guard
+            .iter()
+            .filter(|((t, _p), _)| t == &topic)
+            .map(|(_, h)| h.clone())
+            .collect()
+    };
+    for h in &handles {
+        let _ = h.pw_tx.send(PwMsg::UpdateConfig(new_cfg)).await;
+        let _ = h
+            .uploader_tx
+            .send(crate::uploader::UploaderMsg::UpdateConfig(new_cfg))
+            .await;
+    }
+
+    // Now take a write lock and update PartitionHandle.cfg on every
+    // matching entry. A concurrent auto-create/delete that mutates the
+    // map between the read snapshot and the write scan is fine — we
+    // just walk whatever's present.
+    {
+        let mut guard = state.partitions.write().await;
+        for ((t, _p), h) in guard.iter_mut() {
+            if t == &topic {
+                h.cfg = new_cfg;
+            }
+        }
+    }
+
+    Frame {
+        command: Command {
+            correlation_id,
+            body: Some(Body::AlterTopicConfigResp(
+                kafkrs_models::wire::v1::AlterTopicConfigResponse {
+                    overrides: Some(model_overrides_to_wire(merged)),
+                },
+            )),
         },
         payload: Bytes::new(),
     }

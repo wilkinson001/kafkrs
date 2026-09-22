@@ -81,6 +81,71 @@ impl ResolvedTopicConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigValidationError {
+    FieldOutOfRange {
+        field: &'static str,
+        value: String,
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigValidationError::FieldOutOfRange {
+                field,
+                value,
+                reason,
+            } => write!(f, "field `{field}` value `{value}` out of range: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigValidationError {}
+
+impl TopicConfigOverrides {
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        if let Some(v) = self.segment_size_bytes {
+            if v < 1 {
+                return Err(ConfigValidationError::FieldOutOfRange {
+                    field: "segment_size_bytes",
+                    value: v.to_string(),
+                    reason: "must be >= 1 (0 would seal every record then re-seal instantly)",
+                });
+            }
+        }
+        if let Some(v) = self.segment_seal_time_ms {
+            if v < 1 {
+                return Err(ConfigValidationError::FieldOutOfRange {
+                    field: "segment_seal_time_ms",
+                    value: v.to_string(),
+                    reason: "must be >= 1 (0 defeats seal-by-time)",
+                });
+            }
+        }
+        if let Some(v) = self.retention_ms {
+            if v < -1 {
+                return Err(ConfigValidationError::FieldOutOfRange {
+                    field: "retention_ms",
+                    value: v.to_string(),
+                    reason: "must be >= -1 (-1 = never; other negatives are meaningless)",
+                });
+            }
+        }
+        if let Some(v) = self.retention_bytes {
+            if v < -1 {
+                return Err(ConfigValidationError::FieldOutOfRange {
+                    field: "retention_bytes",
+                    value: v.to_string(),
+                    reason: "must be >= -1 (-1 = no cap; other negatives are meaningless)",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +239,101 @@ mod tests {
             err.to_string().contains("uuid"),
             "expected error mentioning `uuid` field, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_accepts_defaults() {
+        assert!(TopicConfigOverrides::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_segment_size_zero() {
+        let o = TopicConfigOverrides {
+            segment_size_bytes: Some(0),
+            ..Default::default()
+        };
+        match o.validate() {
+            Err(ConfigValidationError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "segment_size_bytes");
+            }
+            other => panic!("expected FieldOutOfRange for segment_size_bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_segment_seal_time_zero() {
+        let o = TopicConfigOverrides {
+            segment_seal_time_ms: Some(0),
+            ..Default::default()
+        };
+        match o.validate() {
+            Err(ConfigValidationError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "segment_seal_time_ms");
+            }
+            other => panic!("expected FieldOutOfRange for segment_seal_time_ms, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_retention_ms_below_minus_one() {
+        let o = TopicConfigOverrides {
+            retention_ms: Some(-2),
+            ..Default::default()
+        };
+        match o.validate() {
+            Err(ConfigValidationError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "retention_ms");
+            }
+            other => panic!("expected FieldOutOfRange for retention_ms, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_retention_bytes_below_minus_one() {
+        let o = TopicConfigOverrides {
+            retention_bytes: Some(-2),
+            ..Default::default()
+        };
+        match o.validate() {
+            Err(ConfigValidationError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "retention_bytes");
+            }
+            other => panic!("expected FieldOutOfRange for retention_bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_full_config() {
+        let o = TopicConfigOverrides {
+            segment_size_bytes: Some(1024),
+            segment_seal_time_ms: Some(1000),
+            max_key_size_bytes: Some(512),
+            max_value_size_bytes: Some(65_536),
+            group_commit_time_ms: Some(10),
+            group_commit_size_bytes: Some(1024),
+            group_commit_record_count: Some(64),
+            max_fetch_wait_ms: Some(100),
+            retention_ms: Some(60_000),
+            retention_bytes: Some(1_000_000_000),
+        };
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_retention_ms_negative_one_sentinel() {
+        let o = TopicConfigOverrides {
+            retention_ms: Some(-1),
+            ..Default::default()
+        };
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_retention_bytes_negative_one_sentinel() {
+        let o = TopicConfigOverrides {
+            retention_bytes: Some(-1),
+            ..Default::default()
+        };
+        assert!(o.validate().is_ok());
     }
 }

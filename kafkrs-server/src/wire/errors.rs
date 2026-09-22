@@ -29,6 +29,7 @@ pub fn registry_error_code(e: &RegistryError) -> ErrorCode {
         RegistryError::AlreadyExists => ErrorCode::ErrTopicAlreadyExists,
         RegistryError::Io(_) => ErrorCode::ErrInternal,
         RegistryError::UnknownTopic => ErrorCode::ErrUnknownTopic,
+        RegistryError::InvalidConfig(_) => ErrorCode::ErrInvalidConfig,
     }
 }
 
@@ -69,6 +70,16 @@ mod tests {
         assert_eq!(
             registry_error_code(&RegistryError::Io("disk full".into())),
             ErrorCode::ErrInternal,
+        );
+    }
+
+    #[test]
+    fn registry_invalid_config_maps_to_err_invalid_config() {
+        assert_eq!(
+            registry_error_code(&RegistryError::InvalidConfig(
+                "segment_size_bytes = 0".into()
+            )),
+            ErrorCode::ErrInvalidConfig,
         );
     }
 

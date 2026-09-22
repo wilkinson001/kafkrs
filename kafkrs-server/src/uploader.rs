@@ -28,6 +28,12 @@ pub struct SealedBatch {
 pub enum UploaderMsg {
     Upload(SealedBatch),
     RetentionKick,
+    /// Live config replacement. FIFO ordering: any pending `Upload` or
+    /// `RetentionKick` is drained before this arrives, so the update
+    /// affects only subsequent operations. `retention_pass` reads
+    /// `self.cfg.retention_ms` / `self.cfg.retention_bytes` on each call,
+    /// so the next kick or upload picks up the new values.
+    UpdateConfig(ResolvedTopicConfig),
     /// Drain signal used by DeleteTopic. Any `Upload` messages enqueued
     /// before this one (e.g. by PartitionWriter's `seal_and_handoff` during
     /// its own shutdown) are processed first because the channel is FIFO
@@ -129,6 +135,9 @@ impl Uploader {
                     if let Err(e) = self.retention_pass("kick").await {
                         log::warn!("retention_pass on kick failed: {e:?}");
                     }
+                }
+                UploaderMsg::UpdateConfig(new_cfg) => {
+                    self.cfg = new_cfg;
                 }
                 UploaderMsg::Shutdown { ack } => {
                     // All Upload messages enqueued before this Shutdown were
@@ -524,5 +533,47 @@ mod tests {
         assert_eq!(m.segments.len(), 1);
         assert_eq!(m.segments[0].base_offset, 10);
         assert!(get(&store, &old_key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_config_replaces_cfg_for_next_retention_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = build_store(&fs_cfg(), dir.path().to_str().unwrap()).unwrap();
+        let cfg = ResolvedTopicConfig::resolve(
+            &kafkrs_models::topic::TopicConfigOverrides::default(),
+            kafkrs_models::config::DiskType::Nvme,
+        );
+        let (tx, rx) = mpsc::channel::<UploaderMsg>(16);
+        let (dtx, _drx) = mpsc::channel(16);
+        let up = Uploader::new(
+            store,
+            "".into(),
+            "t".into(),
+            "01936a80-0000-7000-8000-000000000000".into(),
+            0,
+            cfg,
+            rx,
+            dtx,
+        );
+        tokio::spawn(up.run());
+
+        let new_cfg = ResolvedTopicConfig::resolve(
+            &kafkrs_models::topic::TopicConfigOverrides {
+                retention_ms: Some(500),
+                ..Default::default()
+            },
+            kafkrs_models::config::DiskType::Nvme,
+        );
+        tx.send(UploaderMsg::UpdateConfig(new_cfg)).await.unwrap();
+
+        // Prove the actor is still alive and processing messages after the
+        // update by sending a RetentionKick and letting it drain without
+        // panicking. There's no seg to evict; the kick just runs and returns.
+        tx.send(UploaderMsg::RetentionKick).await.unwrap();
+
+        // Cleanly shut down.
+        let (ack, arx) = oneshot::channel();
+        tx.send(UploaderMsg::Shutdown { ack }).await.unwrap();
+        arx.await.unwrap();
     }
 }

@@ -4,6 +4,12 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.2] — 2026-09-22
+
+- Added `AlterTopicConfigRequest` / `AlterTopicConfigResponse` at oneof fields 52 / 53. Shrunk the admin reserved range to `[54, 59]`.
+- Added `ERR_INVALID_CONFIG = 207` error code.
+- Added `TopicConfigOverrides::validate()` pure function and `ConfigValidationError` type. Enforces `segment_size_bytes >= 1`, `segment_seal_time_ms >= 1`, `retention_ms >= -1`, `retention_bytes >= -1`.
+
 ## [0.6.1] — 2026-09-22
 
 Lockstep bump. No `kafkrs-models` API changes in this release — see `kafkrs-server` 0.6.1 for the admin-port `/health` and `/ready` endpoints.

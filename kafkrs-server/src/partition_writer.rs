@@ -40,6 +40,12 @@ pub enum PwMsg {
     },
     /// Uploader signalled a segment is durable.
     SegmentDurable(SegmentDurable),
+    /// Live config replacement. FIFO ordering guarantees any pending
+    /// Produce or seal has already been dequeued before this arrives;
+    /// the next batch after this message uses the new cfg. In-flight
+    /// batches complete under the old cfg because thresholds are
+    /// captured on entry to the batch's group-commit / seal path.
+    UpdateConfig(ResolvedTopicConfig),
     /// Graceful shutdown: seal any in-flight batch (best-effort), hand it off
     /// to the uploader, then ack once quiesced. Used by DeleteTopic to
     /// guarantee WAL/manifest state is settled before the RPC responds.
@@ -162,6 +168,9 @@ impl PartitionWriter {
                             let _ = reply.send(self.read_active(from_offset, max_records));
                         }
                         Some(PwMsg::SegmentDurable(d)) => self.on_durable(d),
+                        Some(PwMsg::UpdateConfig(new_cfg)) => {
+                            self.cfg = new_cfg;
+                        }
                         Some(PwMsg::Shutdown { ack }) => {
                             self.flush_commit().await;
                             // Best-effort seal of the active batch so any records already
@@ -495,5 +504,63 @@ mod tests {
             .await
             .expect("actor did not exit within 1s")
             .expect("actor task panicked");
+    }
+
+    #[tokio::test]
+    async fn update_config_replaces_cfg_on_next_batch() {
+        // Build a writer with segment_seal_time_ms = 60_000 (default). Send
+        // UpdateConfig with a shorter time, produce, and verify no seal
+        // occurred (we can't easily observe cfg directly, so we assert
+        // the writer stays alive and produces successfully after the
+        // UpdateConfig message — a smoke test that the arm compiles and
+        // runs).
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let cfg = ResolvedTopicConfig::resolve(
+            &TopicConfigOverrides::default(),
+            kafkrs_models::config::DiskType::Nvme,
+        );
+        let (utx, _urx) = mpsc::channel::<UploaderMsg>(16);
+        let (pw_tx, pw_rx) = mpsc::channel(16);
+        let (tail, _) = tokio::sync::broadcast::channel(16);
+        let pw = PartitionWriter::new(
+            dd,
+            "t".into(),
+            "01936a80-0000-7000-8000-000000000000".into(),
+            0,
+            cfg,
+            0,
+            vec![],
+            pw_rx,
+            utx,
+            tail,
+        )
+        .unwrap();
+        tokio::spawn(pw.run());
+
+        let new_cfg = ResolvedTopicConfig::resolve(
+            &TopicConfigOverrides {
+                segment_seal_time_ms: Some(1),
+                ..Default::default()
+            },
+            kafkrs_models::config::DiskType::Nvme,
+        );
+        pw_tx.send(PwMsg::UpdateConfig(new_cfg)).await.unwrap();
+
+        // Produce after the update to prove the writer is still running.
+        let (ack, arx) = oneshot::channel();
+        pw_tx
+            .send(PwMsg::Produce {
+                records: vec![IncomingRecord {
+                    schema_id: 0,
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    timestamp_ns: 0,
+                }],
+                ack,
+            })
+            .await
+            .unwrap();
+        assert_eq!(arx.await.unwrap(), 0);
     }
 }

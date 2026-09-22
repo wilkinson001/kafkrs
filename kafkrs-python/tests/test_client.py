@@ -14,6 +14,7 @@ import pytest
 
 from kafkrs import Client
 from kafkrs.client import WireError
+from kafkrs.wire import v1_pb2
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -225,3 +226,37 @@ async def test_delete_topic_removes_data(broker_no_auto_create: int) -> None:
             await c.produce("smoke-delete", 0, [(b"k", b"v")])
         # ErrUnknownTopic is code 200 per v1.proto.
         assert exc_info.value.code == 200
+
+
+@pytest.mark.asyncio
+async def test_alter_topic_config_round_trip(broker_no_auto_create: int) -> None:
+    async with Client("127.0.0.1", broker_no_auto_create) as client:
+        topic = "alter-config-round-trip"
+        await client.create_topic(topic, partition_count=1)
+
+        overrides = v1_pb2.TopicConfigOverrides()
+        overrides.retention_ms = 60_000
+        resp = await client.alter_topic_config(topic, overrides)
+        assert resp.retention_ms == 60_000
+
+
+@pytest.mark.asyncio
+async def test_alter_topic_config_unknown_raises(broker_no_auto_create: int) -> None:
+    async with Client("127.0.0.1", broker_no_auto_create) as client:
+        overrides = v1_pb2.TopicConfigOverrides()
+        with pytest.raises(WireError) as excinfo:
+            await client.alter_topic_config("does-not-exist", overrides)
+        assert excinfo.value.code == v1_pb2.ERR_UNKNOWN_TOPIC
+
+
+@pytest.mark.asyncio
+async def test_alter_topic_config_invalid_value_raises(broker_no_auto_create: int) -> None:
+    async with Client("127.0.0.1", broker_no_auto_create) as client:
+        topic = "alter-config-invalid"
+        await client.create_topic(topic, partition_count=1)
+
+        overrides = v1_pb2.TopicConfigOverrides()
+        overrides.segment_size_bytes = 0
+        with pytest.raises(WireError) as excinfo:
+            await client.alter_topic_config(topic, overrides)
+        assert excinfo.value.code == v1_pb2.ERR_INVALID_CONFIG

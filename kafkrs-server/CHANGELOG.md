@@ -4,6 +4,13 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.2] — 2026-09-22
+
+- Added `AlterTopicConfig` admin RPC. Partial-patch semantics: fields set on the request overwrite the stored config; unset fields are unchanged. Merged config is persisted to `topics.json` before running `PartitionWriter` and `Uploader` actors are pushed `UpdateConfig` messages, so a crash between persist and push self-heals on restart.
+- Added `RegistryMsg::Alter` and `RegistryError::InvalidConfig`. `CreateTopic` and `AlterTopicConfig` both validate their config against `TopicConfigOverrides::validate()`.
+- Added `PwMsg::UpdateConfig(ResolvedTopicConfig)` and `UploaderMsg::UpdateConfig(ResolvedTopicConfig)` for live config replacement. FIFO ordering guarantees in-flight batches complete under the old config.
+- Added startup validation gate: `TopicRegistry::load` panics with a message naming the topic and offending field if `topics.json` contains an out-of-range value.
+
 ## [0.6.1] — 2026-09-22
 
 Additive release: broker liveness and readiness endpoints on an independent `ports.health` admin port.

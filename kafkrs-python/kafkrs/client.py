@@ -188,6 +188,28 @@ class Client:
         if resp.WhichOneof("body") != "delete_topic_resp":
             raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
 
+    async def alter_topic_config(
+        self,
+        topic: str,
+        overrides: v1_pb2.TopicConfigOverrides,
+    ) -> v1_pb2.TopicConfigOverrides:
+        """Alter a topic's config using partial-patch semantics.
+
+        Fields set to a non-default value on ``overrides`` overwrite the
+        corresponding field in the stored config; unset fields are unchanged.
+        Returns the merged overrides post-patch.
+        """
+        cmd = v1_pb2.Command()
+        cmd.correlation_id = self._next_id()
+        cmd.alter_topic_config.topic = topic
+        cmd.alter_topic_config.overrides.CopyFrom(overrides)
+        resp, _ = await self._roundtrip(cmd, b"")
+        if resp.WhichOneof("body") == "error":
+            raise WireError(resp.error.code, resp.error.message)
+        if resp.WhichOneof("body") != "alter_topic_config_resp":
+            raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
+        return resp.alter_topic_config_resp.overrides
+
     async def list_topics(self) -> List[str]:
         cmd = v1_pb2.Command()
         cmd.correlation_id = self._next_id()

@@ -11,6 +11,8 @@
 
 use kafkrs_models::config::PortsConfig;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 // ---------- Metric name constants (32 metrics total) ----------
 
@@ -79,8 +81,17 @@ pub const LATENCY_BUCKETS_MS: &[f64] = &[
 /// Set once at `init`; read from `partition_label`.
 static HIGH_CARDINALITY: AtomicBool = AtomicBool::new(false);
 
+/// Process start time, set once at `init`. Read by `uptime_updater`.
+static START_TIME: OnceLock<Instant> = OnceLock::new();
+
 /// Install the global Prometheus recorder and start the HTTP scrape listener.
 /// No-op (returns `Ok(())`) when `ports.metrics` is `None`.
+///
+/// Does not spawn the uptime-updater background task itself — `init` must
+/// stay usable without an ambient tokio runtime (see the test helper in
+/// `tests/wire_e2e.rs`, which calls `init` from a bare `std::thread`).
+/// Callers running under a tokio runtime (i.e. `main.rs`) should spawn
+/// [`uptime_updater`] themselves alongside the `init` call.
 pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
     HIGH_CARDINALITY.store(high_cardinality, Ordering::Relaxed);
     let Some(port) = ports.metrics else {
@@ -94,8 +105,38 @@ pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
         .set_buckets(LATENCY_BUCKETS_MS)?
         .with_http_listener(addr)
         .install()?;
+    START_TIME.set(Instant::now()).ok();
     describe_all();
+    emit_build_info();
     Ok(())
+}
+
+/// Emit `RUNTIME_BUILD_INFO` once at boot: a constant-1 gauge carrying the
+/// broker's version and (optionally, compile-time-injected) git SHA as
+/// labels. Scraping this metric family tells you which build is running.
+fn emit_build_info() {
+    let version = env!("CARGO_PKG_VERSION");
+    let git_sha = option_env!("KAFKRS_GIT_SHA").unwrap_or("unknown");
+    metrics::gauge!(
+        RUNTIME_BUILD_INFO,
+        LABEL_VERSION => version,
+        LABEL_GIT_SHA => git_sha
+    )
+    .set(1.0);
+}
+
+/// Background task: every 10s, set `RUNTIME_UPTIME_SECONDS` to the elapsed
+/// time since `init` recorded `START_TIME`. Must be spawned by the caller
+/// on a live tokio runtime after `init` returns — see [`init`]'s doc comment.
+pub async fn uptime_updater() {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        if let Some(start) = START_TIME.get() {
+            let uptime = start.elapsed().as_secs_f64();
+            metrics::gauge!(RUNTIME_UPTIME_SECONDS).set(uptime);
+        }
+    }
 }
 
 /// Register HELP text and units for every metric the broker emits.

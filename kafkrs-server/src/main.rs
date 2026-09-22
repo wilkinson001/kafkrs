@@ -32,6 +32,7 @@ async fn main() {
 
     kafkrs_server::metrics::init(&cfg.ports, cfg.broker.metrics_high_cardinality)
         .expect("metrics init");
+    tokio::spawn(kafkrs_server::metrics::uptime_updater());
 
     let store: Arc<dyn ::object_store::ObjectStore> =
         build_store(&cfg.object_store, &cfg.data_dir).expect("object store");

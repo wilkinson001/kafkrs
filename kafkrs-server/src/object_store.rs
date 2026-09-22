@@ -34,26 +34,35 @@ pub fn build_store(cfg: &ObjectStoreConfig, data_dir: &str) -> Result<Arc<dyn Ob
 
 /// Deterministic object key for a sealed segment (spec §"Object key layout").
 /// `prefix` is the configured `object_store.prefix` (may be empty).
-pub fn segment_key(prefix: &str, topic: &str, partition: u32, base_offset: i64) -> ObjPath {
+pub fn segment_key(
+    prefix: &str,
+    topic: &str,
+    topic_uuid: &str,
+    partition: u32,
+    base_offset: i64,
+) -> ObjPath {
     join(
         prefix,
         topic,
+        topic_uuid,
         partition,
         &format!("segment-{:020}.parquet", base_offset),
     )
 }
 
-pub fn manifest_key(prefix: &str, topic: &str, partition: u32) -> ObjPath {
-    join(prefix, topic, partition, "manifest.json")
+pub fn manifest_key(prefix: &str, topic: &str, topic_uuid: &str, partition: u32) -> ObjPath {
+    join(prefix, topic, topic_uuid, partition, "manifest.json")
 }
 
-fn join(prefix: &str, topic: &str, partition: u32, leaf: &str) -> ObjPath {
+fn join(prefix: &str, topic: &str, topic_uuid: &str, partition: u32, leaf: &str) -> ObjPath {
     let mut s: String = String::new();
     if !prefix.is_empty() {
         s.push_str(prefix.trim_end_matches('/'));
         s.push('/');
     }
-    s.push_str(&format!("{topic}/partition={partition}/{leaf}"));
+    s.push_str(&format!(
+        "{topic}/v={topic_uuid}/partition={partition}/{leaf}"
+    ));
     ObjPath::from(s)
 }
 
@@ -85,19 +94,25 @@ mod tests {
 
     #[test]
     fn keys_are_hive_partitioned_and_zero_padded() {
-        let k = segment_key("", "orders", 3, 100);
+        let k = segment_key("", "orders", "01936a80-0000-7000-8000-000000000000", 3, 100);
         assert_eq!(
             k.to_string(),
-            "orders/partition=3/segment-00000000000000000100.parquet"
+            "orders/v=01936a80-0000-7000-8000-000000000000/partition=3/segment-00000000000000000100.parquet"
         );
-        let k2 = segment_key("env/v1", "orders", 0, 0);
+        let k2 = segment_key(
+            "env/v1",
+            "orders",
+            "01936a80-0000-7000-8000-000000000000",
+            0,
+            0,
+        );
         assert_eq!(
             k2.to_string(),
-            "env/v1/orders/partition=0/segment-00000000000000000000.parquet"
+            "env/v1/orders/v=01936a80-0000-7000-8000-000000000000/partition=0/segment-00000000000000000000.parquet"
         );
         assert_eq!(
-            manifest_key("", "orders", 3).to_string(),
-            "orders/partition=3/manifest.json"
+            manifest_key("", "orders", "01936a80-0000-7000-8000-000000000000", 3).to_string(),
+            "orders/v=01936a80-0000-7000-8000-000000000000/partition=3/manifest.json"
         );
     }
 
@@ -112,7 +127,7 @@ mod tests {
             region: "us-east-1".into(),
         };
         let store = build_store(&cfg, dir.path().to_str().unwrap()).unwrap();
-        let key = manifest_key("", "t", 0);
+        let key = manifest_key("", "t", "01936a80-0000-7000-8000-000000000000", 0);
         put(&store, &key, Bytes::from_static(b"hello"))
             .await
             .unwrap();
@@ -136,10 +151,19 @@ mod tests {
             dir.path().to_str().unwrap(),
         )
         .unwrap();
-        let key = segment_key("", "t", 0, 42);
+        let key = segment_key("", "t", "01936a80-0000-7000-8000-000000000000", 0, 42);
         put(&store, &key, Bytes::from_static(b"hi")).await.unwrap();
         assert_eq!(get(&store, &key).await.unwrap(), Bytes::from_static(b"hi"));
         delete(&store, &key).await.unwrap();
         assert!(get(&store, &key).await.is_err());
+    }
+
+    #[test]
+    fn segment_key_contains_topic_uuid() {
+        let key = segment_key("", "orders", "abcd-uuid", 3, 100);
+        assert!(
+            key.to_string().contains("orders/v=abcd-uuid/partition=3/"),
+            "missing v=<uuid>/ segment: {key}"
+        );
     }
 }

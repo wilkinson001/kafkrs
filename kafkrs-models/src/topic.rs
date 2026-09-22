@@ -29,6 +29,7 @@ pub struct TopicConfigOverrides {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TopicEntry {
     pub name: String,
+    pub uuid: String,
     pub partition_count: u32,
     pub created_at_ns: i64,
     #[serde(default)]
@@ -137,6 +138,7 @@ mod tests {
         let mut f = TopicRegistryFile::default();
         f.topics.push(TopicEntry {
             name: "orders".into(),
+            uuid: "01936a80-1234-7890-abcd-ef1234567890".into(),
             partition_count: 3,
             created_at_ns: 1,
             config: TopicConfigOverrides::default(),
@@ -145,5 +147,32 @@ mod tests {
         let back: TopicRegistryFile = serde_json::from_str(&j).unwrap();
         assert_eq!(back.topics[0].name, "orders");
         assert_eq!(back.topics[0].partition_count, 3);
+    }
+
+    #[test]
+    fn topic_entry_roundtrips_with_uuid() {
+        let e = TopicEntry {
+            name: "orders".into(),
+            uuid: "01936a80-1234-7890-abcd-ef1234567890".into(),
+            partition_count: 4,
+            created_at_ns: 1_700_000_000_000_000_000,
+            config: TopicConfigOverrides::default(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TopicEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.uuid, e.uuid);
+        assert_eq!(back.name, e.name);
+        assert_eq!(back.partition_count, 4);
+    }
+
+    #[test]
+    fn topic_entry_without_uuid_fails_to_deserialize() {
+        // Simulates a 0.5.0 topics.json entry (no uuid field).
+        let legacy = r#"{"name":"orders","partition_count":1,"created_at_ns":0}"#;
+        let err = serde_json::from_str::<TopicEntry>(legacy).unwrap_err();
+        assert!(
+            err.to_string().contains("uuid"),
+            "expected error mentioning `uuid` field, got: {err}"
+        );
     }
 }

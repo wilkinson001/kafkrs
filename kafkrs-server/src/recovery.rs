@@ -21,6 +21,7 @@ pub struct PartitionRecovery {
 pub async fn recover_partition(
     data_dir: &str,
     topic: &str,
+    topic_uuid: &str,
     partition: u32,
     store: &Arc<dyn ObjectStore>,
     prefix: &str,
@@ -45,7 +46,7 @@ pub async fn recover_partition(
     wal_bases.sort();
 
     // single GET of the manifest (spec: no object-store LIST).
-    let raw: Bytes = get(store, &manifest_key(prefix, topic, partition)).await?;
+    let raw: Bytes = get(store, &manifest_key(prefix, topic, topic_uuid, partition)).await?;
     let manifest: Manifest = serde_json::from_slice(&raw)?;
     let last_uploaded: Option<i64> = manifest.last_uploaded_offset();
 
@@ -129,9 +130,10 @@ mod tests {
             byte_size: 1,
             object_key: "segment-00000000000000000000.parquet".into(),
         });
+        const UUID: &str = "01936a80-0000-7000-8000-000000000000";
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", UUID, 0),
             bytes::Bytes::from(serde_json::to_vec(&m).unwrap()),
         )
         .await
@@ -142,7 +144,9 @@ mod tests {
         let mut w5 = WalFile::open(&dd, "t", 0, 5).unwrap();
         w5.append_and_sync(&[rec(5), rec(6)]).unwrap();
 
-        let r = recover_partition(&dd, "t", 0, &store, "").await.unwrap();
+        let r = recover_partition(&dd, "t", UUID, 0, &store, "")
+            .await
+            .unwrap();
         assert_eq!(
             r.active_records
                 .iter()

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-// ---------- Metric name constants (32 metrics total) ----------
+// ---------- Metric name constants (37 metrics total) ----------
 
 // Wire path — produce
 pub const PRODUCE_RECORDS: &str = "messaging.kafkrs.produce.records";
@@ -59,6 +59,13 @@ pub const RUNTIME_BUILD_INFO: &str = "kafkrs.runtime.build_info";
 pub const WIRE_CONNECTIONS_ACTIVE: &str = "kafkrs.wire.connections_active";
 pub const WIRE_CONNECTIONS_ACCEPTED: &str = "kafkrs.wire.connections_accepted";
 pub const WIRE_RPC_REQUESTS: &str = "kafkrs.wire.rpc_requests";
+
+// Deletion sweep
+pub const DELETE_PENDING_TOPICS: &str = "kafkrs.delete.pending_topics";
+pub const DELETE_SEGMENTS_REMOVED: &str = "kafkrs.delete.segments_removed";
+pub const DELETE_BYTES_REMOVED: &str = "kafkrs.delete.bytes_removed";
+pub const DELETE_DURATION_MS: &str = "kafkrs.delete.duration_ms";
+pub const DELETE_ERRORS: &str = "kafkrs.delete.errors";
 
 // ---------- Label key constants ----------
 pub const LABEL_TOPIC: &str = "topic";
@@ -263,6 +270,30 @@ pub(crate) fn describe_all() {
         WIRE_RPC_REQUESTS,
         "RPCs served, by RPC kind and result code"
     );
+
+    // Deletion sweep
+    metrics::describe_gauge!(
+        DELETE_PENDING_TOPICS,
+        "Currently in-flight deletion sweeps (broker-wide)"
+    );
+    metrics::describe_counter!(
+        DELETE_SEGMENTS_REMOVED,
+        "Segments deleted by deletion sweeps"
+    );
+    metrics::describe_counter!(
+        DELETE_BYTES_REMOVED,
+        metrics::Unit::Bytes,
+        "Cumulative bytes reclaimed by deletion sweeps"
+    );
+    metrics::describe_histogram!(
+        DELETE_DURATION_MS,
+        metrics::Unit::Milliseconds,
+        "Per-sweep wall-clock duration"
+    );
+    metrics::describe_counter!(
+        DELETE_ERRORS,
+        "Object-store DELETE calls that failed during sweep"
+    );
 }
 
 /// Return a label set for a hot-path metric. Always includes `topic`;
@@ -326,11 +357,22 @@ pub(crate) const ALL_METRIC_NAMES: &[&str] = &[
     WIRE_CONNECTIONS_ACTIVE,
     WIRE_CONNECTIONS_ACCEPTED,
     WIRE_RPC_REQUESTS,
+    DELETE_PENDING_TOPICS,
+    DELETE_SEGMENTS_REMOVED,
+    DELETE_BYTES_REMOVED,
+    DELETE_DURATION_MS,
+    DELETE_ERRORS,
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that toggle the process-global `HIGH_CARDINALITY`
+    /// flag. Without this, `cargo test`'s default parallel execution races
+    /// two tests' `store(true)` / `store(false)` calls against each other's
+    /// assertions.
+    static HIGH_CARDINALITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn latency_buckets_are_monotonically_increasing() {
@@ -350,6 +392,9 @@ mod tests {
 
     #[test]
     fn partition_label_respects_flag() {
+        let _guard = HIGH_CARDINALITY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         HIGH_CARDINALITY.store(false, Ordering::Relaxed);
         let labels = partition_label("orders", 3);
         assert_eq!(labels, vec![(LABEL_TOPIC, "orders".to_string())]);
@@ -368,6 +413,9 @@ mod tests {
 
     #[test]
     fn partition_label_with_appends_extras_and_respects_flag() {
+        let _guard = HIGH_CARDINALITY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         HIGH_CARDINALITY.store(false, Ordering::Relaxed);
         let labels = partition_label_with("orders", 3, &[(LABEL_ERROR_CODE, "7".to_string())]);
         assert_eq!(
@@ -393,11 +441,11 @@ mod tests {
 
     #[test]
     fn all_metric_names_are_unique() {
-        assert_eq!(ALL_METRIC_NAMES.len(), 32, "expected 32 metric names");
+        assert_eq!(ALL_METRIC_NAMES.len(), 37, "expected 37 metric names");
         let mut sorted: Vec<&str> = ALL_METRIC_NAMES.to_vec();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), 32, "metric names must be unique");
+        assert_eq!(sorted.len(), 37, "metric names must be unique");
     }
 
     #[test]

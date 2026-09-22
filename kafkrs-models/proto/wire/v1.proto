@@ -7,8 +7,8 @@ message Command {
   //   Subscribe / Subscribed / Flow / Message / Ack / Unsubscribe
   reserved 40 to 49;
   // Reserved for v1.5+ admin RPCs:
-  //   DeleteTopic / DeleteTopicResp / AlterConfig / AlterConfigResp / BrokerInfo
-  reserved 50 to 59;
+  //   AlterConfig / AlterConfigResp / BrokerInfo
+  reserved 52 to 59;
 
   uint64 correlation_id = 1;
 
@@ -32,6 +32,8 @@ message Command {
     DescribeTopicResponse  describe_topic_resp   = 33;
     ListTopicsRequest      list_topics           = 34;
     ListTopicsResponse     list_topics_resp      = 35;
+    DeleteTopicRequest     delete_topic          = 50;
+    DeleteTopicResponse    delete_topic_resp     = 51;
 
     // Errors
     ErrorResponse          error                 = 99;
@@ -131,6 +133,12 @@ message DescribeTopicResponse {
 
 message ListTopicsRequest  {}
 message ListTopicsResponse { repeated string topics = 1; }
+
+message DeleteTopicRequest {
+  string topic             = 1;
+  optional bool delete_data = 2;
+}
+message DeleteTopicResponse {}
 
 // ---- Errors ----
 

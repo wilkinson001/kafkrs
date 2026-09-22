@@ -28,6 +28,8 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 static METRICS_INIT: std::sync::Once = std::sync::Once::new();
 static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
+const TOPIC_UUID: &str = "01936a80-0000-7000-8000-000000000000";
+
 /// Installs the global Prometheus recorder exactly once for this test binary
 /// with `high_cardinality: true`. Mirrors `init_metrics_once` in
 /// `wire_e2e.rs`: install from a dedicated std thread with no ambient tokio
@@ -102,7 +104,7 @@ async fn setup_broker(dd: &str) -> u16 {
     .unwrap();
     put(
         &store,
-        &manifest_key("", "t", 0),
+        &manifest_key("", "t", TOPIC_UUID, 0),
         Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
     )
     .await
@@ -115,7 +117,19 @@ async fn setup_broker(dd: &str) -> u16 {
     let cfg = ResolvedTopicConfig::resolve(&o, DiskType::Nvme);
     let (utx, urx) = mpsc::channel::<UploaderMsg>(64);
     let (dtx, mut drx) = mpsc::channel(64);
-    tokio::spawn(Uploader::new(store.clone(), "".into(), "t".into(), 0, cfg, urx, dtx).run());
+    tokio::spawn(
+        Uploader::new(
+            store.clone(),
+            "".into(),
+            "t".into(),
+            TOPIC_UUID.into(),
+            0,
+            cfg,
+            urx,
+            dtx,
+        )
+        .run(),
+    );
     let (pw_tx, pw_rx) = mpsc::channel(256);
     let (tail, _) = broadcast::channel(1024);
     let pw_tx_d = pw_tx.clone();
@@ -127,6 +141,7 @@ async fn setup_broker(dd: &str) -> u16 {
     let pw = PartitionWriter::new(
         dd.into(),
         "t".into(),
+        TOPIC_UUID.into(),
         0,
         cfg,
         0,
@@ -147,6 +162,7 @@ async fn setup_broker(dd: &str) -> u16 {
             tail,
             cfg,
             uploader_tx: utx,
+            uuid: TOPIC_UUID.into(),
         },
     );
 

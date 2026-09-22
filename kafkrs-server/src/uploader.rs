@@ -14,7 +14,7 @@ use kafkrs_models::topic::ResolvedTopicConfig;
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// A sealed batch handed from the PartitionWriter to the Uploader.
 pub struct SealedBatch {
@@ -28,6 +28,16 @@ pub struct SealedBatch {
 pub enum UploaderMsg {
     Upload(SealedBatch),
     RetentionKick,
+    /// Drain signal used by DeleteTopic. Any `Upload` messages enqueued
+    /// before this one (e.g. by PartitionWriter's `seal_and_handoff` during
+    /// its own shutdown) are processed first because the channel is FIFO
+    /// and PartitionWriter's Shutdown ack — which the caller awaits before
+    /// sending this — only fires after `seal_and_handoff` has already
+    /// enqueued them. Acking confirms all prior uploads + manifest writes
+    /// are durable, so the caller can safely snapshot manifests afterward.
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 /// Notification sent back when a segment is durable in the object store
@@ -42,6 +52,7 @@ pub struct Uploader {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     topic: String,
+    topic_uuid: String,
     partition: u32,
     cfg: ResolvedTopicConfig,
     rx: mpsc::Receiver<UploaderMsg>,
@@ -54,6 +65,7 @@ impl Uploader {
         store: Arc<dyn ObjectStore>,
         prefix: String,
         topic: String,
+        topic_uuid: String,
         partition: u32,
         cfg: ResolvedTopicConfig,
         rx: mpsc::Receiver<UploaderMsg>,
@@ -63,6 +75,7 @@ impl Uploader {
             store,
             prefix,
             topic,
+            topic_uuid,
             partition,
             cfg,
             rx,
@@ -117,6 +130,17 @@ impl Uploader {
                         log::warn!("retention_pass on kick failed: {e:?}");
                     }
                 }
+                UploaderMsg::Shutdown { ack } => {
+                    // All Upload messages enqueued before this Shutdown were
+                    // already processed above (mpsc is FIFO), so every
+                    // pending PUT + manifest update is durable by the time
+                    // we ack. No further Upload/RetentionKick can arrive:
+                    // the topic's partitions are removed from
+                    // state.partitions (and PartitionWriter is gone) before
+                    // handle_delete_topic sends this message.
+                    let _ = ack.send(());
+                    return;
+                }
             }
         }
     }
@@ -124,12 +148,18 @@ impl Uploader {
     async fn upload_once(&self, batch: &SealedBatch) -> Result<()> {
         let bytes: Bytes = write_segment(&batch.records)?;
         let byte_size: u64 = bytes.len() as u64;
-        let seg_key: ObjPath =
-            segment_key(&self.prefix, &self.topic, self.partition, batch.base_offset);
+        let seg_key: ObjPath = segment_key(
+            &self.prefix,
+            &self.topic,
+            &self.topic_uuid,
+            self.partition,
+            batch.base_offset,
+        );
         // Idempotent: deterministic key, bit-identical content on re-upload.
         put(&self.store, &seg_key, bytes).await?;
 
-        let m_key: ObjPath = manifest_key(&self.prefix, &self.topic, self.partition);
+        let m_key: ObjPath =
+            manifest_key(&self.prefix, &self.topic, &self.topic_uuid, self.partition);
         let raw: Bytes = get(&self.store, &m_key).await?;
         let mut manifest: Manifest = serde_json::from_slice(&raw)?;
         let object_key: String = format!("segment-{:020}.parquet", batch.base_offset);
@@ -170,7 +200,8 @@ impl Uploader {
         )
         .increment(1);
 
-        let m_key: ObjPath = manifest_key(&self.prefix, &self.topic, self.partition);
+        let m_key: ObjPath =
+            manifest_key(&self.prefix, &self.topic, &self.topic_uuid, self.partition);
         let raw: Bytes = get(&self.store, &m_key).await?;
         let mut manifest: Manifest = serde_json::from_slice(&raw)?;
 
@@ -200,8 +231,13 @@ impl Uploader {
         // Then delete the segment objects. Orphans on partial failure are
         // accepted (spec §"Manifest-first ordering, orphans accepted").
         for seg in &evict {
-            let seg_key: ObjPath =
-                segment_key(&self.prefix, &self.topic, self.partition, seg.base_offset);
+            let seg_key: ObjPath = segment_key(
+                &self.prefix,
+                &self.topic,
+                &self.topic_uuid,
+                self.partition,
+                seg.base_offset,
+            );
             if let Err(e) = delete(&self.store, &seg_key).await {
                 metrics::counter!(RETENTION_DELETE_FAILURES, &__labels).increment(1);
                 log::warn!(
@@ -220,6 +256,8 @@ mod tests {
     use crate::object_store::build_store;
     use kafkrs_models::config::ObjectStoreConfig;
     use kafkrs_models::manifest::SegmentEntry;
+
+    const UUID: &str = "01936a80-0000-7000-8000-000000000000";
 
     fn fs_cfg() -> ObjectStoreConfig {
         ObjectStoreConfig {
@@ -264,7 +302,7 @@ mod tests {
         // empty manifest precondition
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", UUID, 0),
             bytes::Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
         )
         .await
@@ -276,6 +314,7 @@ mod tests {
             store.clone(),
             "".into(),
             "t".into(),
+            UUID.into(),
             0,
             default_cfg(),
             rx,
@@ -296,7 +335,7 @@ mod tests {
         let durable = drx.recv().await.unwrap();
         assert_eq!(durable.base_offset, 0);
 
-        let raw = get(&store, &manifest_key("", "t", 0)).await.unwrap();
+        let raw = get(&store, &manifest_key("", "t", UUID, 0)).await.unwrap();
         let m: Manifest = serde_json::from_slice(&raw).unwrap();
         assert_eq!(m.segments.len(), 1);
         assert_eq!(m.segments[0].last_offset, 1);
@@ -311,7 +350,7 @@ mod tests {
         let store = build_store(&fs_cfg(), dir.path().to_str().unwrap()).unwrap();
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", UUID, 0),
             bytes::Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
         )
         .await
@@ -323,6 +362,7 @@ mod tests {
                 store.clone(),
                 "".into(),
                 "t".into(),
+                UUID.into(),
                 0,
                 default_cfg(),
                 rx,
@@ -342,7 +382,8 @@ mod tests {
         tx.send(UploaderMsg::Upload(batch())).await.unwrap();
         drx.recv().await.unwrap();
         let m: Manifest =
-            serde_json::from_slice(&get(&store, &manifest_key("", "t", 0)).await.unwrap()).unwrap();
+            serde_json::from_slice(&get(&store, &manifest_key("", "t", UUID, 0)).await.unwrap())
+                .unwrap();
         assert_eq!(
             m.segments.len(),
             1,
@@ -366,7 +407,7 @@ mod tests {
             byte_size: 42,
             object_key: "segment-00000000000000000000.parquet".into(),
         };
-        let old_key = segment_key("", "t", 0, 0);
+        let old_key = segment_key("", "t", UUID, 0, 0);
         put(&store, &old_key, Bytes::from_static(b"placeholder"))
             .await
             .unwrap();
@@ -375,7 +416,7 @@ mod tests {
         m.segments.push(old_seg);
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", UUID, 0),
             Bytes::from(serde_json::to_vec(&m).unwrap()),
         )
         .await
@@ -388,6 +429,7 @@ mod tests {
             store.clone(),
             "".into(),
             "t".into(),
+            UUID.into(),
             0,
             cfg_with_retention_ms(1_000),
             rx,
@@ -411,7 +453,7 @@ mod tests {
         // Give post-upload retention_pass a moment to complete.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let raw = get(&store, &manifest_key("", "t", 0)).await.unwrap();
+        let raw = get(&store, &manifest_key("", "t", UUID, 0)).await.unwrap();
         let m: Manifest = serde_json::from_slice(&raw).unwrap();
         assert_eq!(m.segments.len(), 1, "old segment should have been evicted");
         assert_eq!(m.segments[0].base_offset, 10);
@@ -444,7 +486,7 @@ mod tests {
             byte_size: 42,
             object_key: "segment-00000000000000000010.parquet".into(),
         };
-        let old_key = segment_key("", "t", 0, 0);
+        let old_key = segment_key("", "t", UUID, 0, 0);
         put(&store, &old_key, Bytes::from_static(b"placeholder"))
             .await
             .unwrap();
@@ -454,7 +496,7 @@ mod tests {
         m.segments.push(tail_seg);
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", UUID, 0),
             Bytes::from(serde_json::to_vec(&m).unwrap()),
         )
         .await
@@ -466,6 +508,7 @@ mod tests {
             store.clone(),
             "".into(),
             "t".into(),
+            UUID.into(),
             0,
             cfg_with_retention_ms(1_000),
             rx,
@@ -476,7 +519,7 @@ mod tests {
         tx.send(UploaderMsg::RetentionKick).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let raw = get(&store, &manifest_key("", "t", 0)).await.unwrap();
+        let raw = get(&store, &manifest_key("", "t", UUID, 0)).await.unwrap();
         let m: Manifest = serde_json::from_slice(&raw).unwrap();
         assert_eq!(m.segments.len(), 1);
         assert_eq!(m.segments[0].base_offset, 10);

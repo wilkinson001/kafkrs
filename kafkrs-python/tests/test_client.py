@@ -209,3 +209,19 @@ async def test_create_topic_then_produce(broker_no_auto_create: int) -> None:
         assert recs[0].value == b"v"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_topic_removes_data(broker_no_auto_create: int) -> None:
+    # auto_create_topics=false so a produce after delete raises ErrUnknownTopic
+    # instead of silently recreating the topic.
+    async with Client("127.0.0.1", broker_no_auto_create) as c:
+        await c.create_topic("smoke-delete", partition_count=1)
+        await c.produce("smoke-delete", 0, [(b"k", b"v")])
+        await c.delete_topic("smoke-delete", delete_data=True)
+
+        # Subsequent produce should raise WireError with ErrUnknownTopic.
+        with pytest.raises(WireError) as exc_info:
+            await c.produce("smoke-delete", 0, [(b"k", b"v")])
+        # ErrUnknownTopic is code 200 per v1.proto.
+        assert exc_info.value.code == 200

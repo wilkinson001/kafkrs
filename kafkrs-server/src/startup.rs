@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex, RwLock};
 pub async fn spawn_partition(
     data_dir: &str,
     topic: &str,
+    topic_uuid: String,
     partition: u32,
     cfg: ResolvedTopicConfig,
     store: Arc<dyn object_store::ObjectStore>,
@@ -40,7 +41,7 @@ pub async fn spawn_partition(
         return;
     }
 
-    let rec = recover_partition(data_dir, topic, partition, &store, &prefix)
+    let rec = recover_partition(data_dir, topic, &topic_uuid, partition, &store, &prefix)
         .await
         .expect("recover partition");
 
@@ -55,6 +56,7 @@ pub async fn spawn_partition(
             store.clone(),
             prefix.clone(),
             topic.to_string(),
+            topic_uuid.clone(),
             partition,
             cfg,
             urx,
@@ -94,6 +96,7 @@ pub async fn spawn_partition(
     let pw = PartitionWriter::new(
         data_dir.to_string(),
         topic.to_string(),
+        topic_uuid.clone(),
         partition,
         cfg,
         rec.next_offset,
@@ -121,6 +124,7 @@ pub async fn spawn_partition(
             tail,
             cfg,
             uploader_tx: utx,
+            uuid: topic_uuid,
         },
     );
     metrics::gauge!(PARTITION_COUNT).increment(1.0);

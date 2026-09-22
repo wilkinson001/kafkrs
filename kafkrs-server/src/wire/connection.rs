@@ -13,8 +13,8 @@ use crate::metrics::{
     WIRE_RPC_REQUESTS,
 };
 use crate::wire::dispatch::{
-    handle_connected, handle_create_topic, handle_describe_topic, handle_fetch, handle_list_topics,
-    handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
+    handle_connected, handle_create_topic, handle_delete_topic, handle_describe_topic,
+    handle_fetch, handle_list_topics, handle_ping, handle_produce, SharedState, PROTOCOL_VERSION,
 };
 use crate::wire::errors::make_error;
 use crate::wire::frame::{decode_frame_body, encode_frame, Frame, MAX_FRAME_SIZE};
@@ -269,6 +269,7 @@ async fn dispatch_one(
         Body::CreateTopic(_) => "create_topic",
         Body::DescribeTopic(_) => "describe_topic",
         Body::ListTopics(_) => "list_topics",
+        Body::DeleteTopic(_) => "delete_topic",
         _ => "unknown",
     };
     let response = match body {
@@ -288,6 +289,7 @@ async fn dispatch_one(
         Body::CreateTopic(req) => handle_create_topic(correlation_id, state, req).await,
         Body::DescribeTopic(req) => handle_describe_topic(correlation_id, state, req).await,
         Body::ListTopics(_) => handle_list_topics(correlation_id, state).await,
+        Body::DeleteTopic(req) => handle_delete_topic(correlation_id, state, req).await,
         // Variants the broker should never receive as a request:
         Body::Connect(_)
         | Body::Connected(_)
@@ -297,6 +299,7 @@ async fn dispatch_one(
         | Body::CreateTopicResp(_)
         | Body::DescribeTopicResp(_)
         | Body::ListTopicsResp(_)
+        | Body::DeleteTopicResp(_)
         | Body::Error(_) => Frame {
             command: make_error(
                 correlation_id,

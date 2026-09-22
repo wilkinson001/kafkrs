@@ -32,7 +32,7 @@ Producer ack is gated on WAL `fsync` only; object-store upload is asynchronous. 
 
 **Topic deletion.** `DeleteTopic(delete_data=true)` (the default) removes the registry entry, awaits partition-actor shutdown, deletes the local WAL directory, snapshots per-partition manifests, and spawns a background sweep that cleans up every object-store key under the topic's UUID prefix — plus a one-shot LIST to catch orphan segments. Pending sweeps persist to `data/pending_deletes.json` and replay on next broker restart. `delete_data=false` gives "detach" semantics: registry entry + actors torn down, WAL and object-store data left intact for the operator. Every topic carries a UUIDv7 baked into its object-store prefix so `Delete + Create` under the same name uses disjoint storage — no race, no rename needed.
 
-**Metrics.** When `ports.metrics` is set, the broker exposes 32 metrics on a Prometheus scrape endpoint. Naming follows OpenTelemetry `messaging.*` semantic conventions on the producer/consumer surface; broker-internal state uses a `kafkrs.*` prefix. Every metric name and label key is a `pub const` in `kafkrs-server::metrics` so future renames are one-edit. Per-topic labels always; per-partition labels are behind `broker.metrics_high_cardinality = true`. Call sites go through the `metrics` crate façade — swapping the Prometheus exporter for native OTLP push is a config change, not a rewrite.
+**Metrics.** When `ports.metrics` is set, the broker exposes 37 metrics on a Prometheus scrape endpoint. Naming follows OpenTelemetry `messaging.*` semantic conventions on the producer/consumer surface; broker-internal state uses a `kafkrs.*` prefix. Every metric name and label key is a `pub const` in `kafkrs-server::metrics` so future renames are one-edit. Per-topic labels always; per-partition labels are behind `broker.metrics_high_cardinality = true`. Call sites go through the `metrics` crate façade — swapping the Prometheus exporter for native OTLP push is a config change, not a rewrite.
 
 ### `kafkrs-models`
 
@@ -132,7 +132,7 @@ asyncio.run(main())
 - [`docs/superpowers/specs/2026-05-20-wire-protocol-design.md`](docs/superpowers/specs/2026-05-20-wire-protocol-design.md) — wire protocol (frame format, protobuf schema, Connect handshake, three-task connection model, versioning rules).
 - [`docs/superpowers/specs/2026-09-21-retention-design.md`](docs/superpowers/specs/2026-09-21-retention-design.md) — retention (time-based + size-based segment eviction, Uploader-embedded + broker-wide sweeper, manifest-first ordering).
 - [`docs/superpowers/specs/2026-09-22-delete-topic-design.md`](docs/superpowers/specs/2026-09-22-delete-topic-design.md) — DeleteTopic (mark-and-sweep, per-topic UUIDv7 in object-store prefix, restart-safe pending state).
-- [`docs/superpowers/specs/2026-09-21-metrics-design.md`](docs/superpowers/specs/2026-09-21-metrics-design.md) — metrics (Prometheus scrape endpoint, 32 metrics, OTel `messaging.*` semantic conventions, cardinality policy).
+- [`docs/superpowers/specs/2026-09-21-metrics-design.md`](docs/superpowers/specs/2026-09-21-metrics-design.md) — metrics (Prometheus scrape endpoint, 37 metrics, OTel `messaging.*` semantic conventions, cardinality policy).
 - [`docs/superpowers/plans/`](docs/superpowers/plans/) — execution plans for each release.
 
 ## Repository layout

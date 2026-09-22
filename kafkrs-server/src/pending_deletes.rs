@@ -12,8 +12,16 @@ use kafkrs_models::manifest::Manifest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use tokio::sync::Mutex as AsyncMutex;
 
 const FILE_NAME: &str = "pending_deletes.json";
+
+/// Serializes the load-modify-write cycle in `append`/`remove` so concurrent
+/// `handle_delete_topic` handlers (each spawned per-RPC) can't interleave
+/// and silently drop each other's records. One file, one lock — acceptable
+/// because there's one broker per process.
+static FILE_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PendingDelete {
@@ -47,12 +55,14 @@ pub async fn load_all(data_dir: &str) -> Result<Vec<PendingDelete>> {
 }
 
 pub async fn append(data_dir: &str, record: PendingDelete) -> Result<()> {
+    let _guard = FILE_LOCK.lock().await;
     let mut current = load_all(data_dir).await?;
     current.push(record);
     write_all(data_dir, &current).await
 }
 
 pub async fn remove(data_dir: &str, topic_uuid: &str) -> Result<()> {
+    let _guard = FILE_LOCK.lock().await;
     let mut current = load_all(data_dir).await?;
     current.retain(|r| r.uuid != topic_uuid);
     write_all(data_dir, &current).await
@@ -151,5 +161,33 @@ mod tests {
         let dd = dir.path().to_str().unwrap();
         let back = load_all(dd).await.unwrap();
         assert!(back.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_appends_do_not_lose_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+
+        let mut handles = Vec::new();
+        for i in 0..10u32 {
+            let dd = dd.clone();
+            handles.push(tokio::spawn(async move {
+                let mut r = sample();
+                r.uuid = format!("uuid-{i}");
+                r.topic = format!("topic-{i}");
+                append(&dd, r).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let back = load_all(&dd).await.unwrap();
+        assert_eq!(back.len(), 10, "concurrent appends should not lose records");
+        let mut uuids: Vec<String> = back.iter().map(|r| r.uuid.clone()).collect();
+        uuids.sort();
+        for i in 0..10 {
+            assert_eq!(uuids[i as usize], format!("uuid-{i}"));
+        }
     }
 }

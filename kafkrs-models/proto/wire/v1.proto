@@ -7,8 +7,8 @@ message Command {
   //   Subscribe / Subscribed / Flow / Message / Ack / Unsubscribe
   reserved 40 to 49;
   // Reserved for v1.5+ admin RPCs:
-  //   AlterConfig / AlterConfigResp / BrokerInfo
-  reserved 52 to 59;
+  //   AlterConfig / BrokerInfo
+  reserved 54 to 59;
 
   uint64 correlation_id = 1;
 
@@ -25,7 +25,7 @@ message Command {
     FetchRequest           fetch                 = 22;
     FetchResponse          fetch_resp            = 23;
 
-    // Control plane (30-39)
+    // Control plane (30-39, 50-53)
     CreateTopicRequest     create_topic          = 30;
     CreateTopicResponse    create_topic_resp     = 31;
     DescribeTopicRequest   describe_topic        = 32;
@@ -34,6 +34,8 @@ message Command {
     ListTopicsResponse     list_topics_resp      = 35;
     DeleteTopicRequest     delete_topic          = 50;
     DeleteTopicResponse    delete_topic_resp     = 51;
+    AlterTopicConfigRequest   alter_topic_config      = 52;
+    AlterTopicConfigResponse  alter_topic_config_resp = 53;
 
     // Errors
     ErrorResponse          error                 = 99;
@@ -140,6 +142,14 @@ message DeleteTopicRequest {
 }
 message DeleteTopicResponse {}
 
+message AlterTopicConfigRequest {
+  string topic = 1;
+  TopicConfigOverrides overrides = 2;
+}
+message AlterTopicConfigResponse {
+  TopicConfigOverrides overrides = 1;
+}
+
 // ---- Errors ----
 
 message ErrorResponse {
@@ -166,6 +176,7 @@ enum ErrorCode {
   ERR_RECORD_TOO_LARGE             = 203;
   ERR_KEY_TOO_LARGE                = 204;
   ERR_BROKER_NOT_READY             = 205;
+  ERR_INVALID_CONFIG               = 207;
 
   // Control plane (3xx)
   ERR_TOPIC_ALREADY_EXISTS         = 300;

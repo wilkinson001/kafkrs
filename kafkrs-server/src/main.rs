@@ -120,6 +120,11 @@ async fn main() {
         tokio::spawn(accept_loop(listener, st));
     }
 
+    // Wire listeners are bound and startup work is complete — flip the
+    // readiness flag so `/ready` returns 200 to load balancers and K8s
+    // readiness probes.
+    kafkrs_server::metrics::set_ready(true);
+
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutdown signal received. Goodbye"),
         Err(e) => error!("signal error: {e}"),

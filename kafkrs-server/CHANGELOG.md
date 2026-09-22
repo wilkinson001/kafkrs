@@ -4,6 +4,18 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.1] — 2026-09-22
+
+Additive release: broker admin endpoints (`/health` liveness + `/ready` readiness) served on the existing `ports.metrics` admin port.
+
+### Added
+- `GET /health` — always returns `200 OK` + `ok` while the broker process is running. Suitable for Kubernetes liveness probes and load-balancer health checks.
+- `GET /ready` — returns `503 Service Unavailable` during startup and flips to `200 OK` once wire listeners are bound (`main.rs` calls `metrics::set_ready(true)` at that point). Suitable for Kubernetes readiness probes.
+- `pub fn metrics::set_ready(bool)` for callers that want to gate readiness on additional conditions.
+
+### Changed
+- The admin HTTP endpoint is now hand-rolled inside `metrics::init` instead of relying on `PrometheusBuilder::with_http_listener`. `install_recorder()` returns a `PrometheusHandle` whose `.render()` produces the exposition text on demand; the same listener serves `/metrics`, `/health`, and `/ready`.
+
 ## [0.6.0] — 2026-09-22
 
 DeleteTopic: mark-and-sweep semantics with fast client response, restart-safe pending state, and topic UUIDs baked into object-store prefixes so `Delete + Create` under the same name is race-free. See `docs/superpowers/specs/2026-09-22-delete-topic-design.md`.

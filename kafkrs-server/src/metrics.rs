@@ -91,6 +91,26 @@ static HIGH_CARDINALITY: AtomicBool = AtomicBool::new(false);
 /// Process start time, set once at `init`. Read by `uptime_updater`.
 static START_TIME: OnceLock<Instant> = OnceLock::new();
 
+/// Readiness flag: `false` until [`set_ready`] flips it. Read by the `/ready`
+/// admin-port route to distinguish "process alive but not yet accepting
+/// traffic" (503) from "ready to serve" (200). `main.rs` calls
+/// `set_ready(true)` immediately after spawning the wire listeners.
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Mark the broker as ready (or not-ready) to serve traffic.
+///
+/// Called by `main.rs` after wire listeners are bound. In tests, only the
+/// dedicated ready-endpoint test calls this — no other test touches the flag.
+pub fn set_ready(ready: bool) {
+    READY.store(ready, Ordering::Relaxed);
+}
+
+/// Read the current readiness flag. Primarily for the `/ready` handler and
+/// its unit test.
+pub(crate) fn is_ready() -> bool {
+    READY.load(Ordering::Relaxed)
+}
+
 /// Install the global Prometheus recorder and start the HTTP scrape listener.
 /// No-op (returns `Ok(())`) when `ports.metrics` is `None`.
 ///
@@ -108,13 +128,152 @@ pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
     use std::net::SocketAddr;
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    PrometheusBuilder::new()
+    // `install_recorder()` installs the global recorder and returns a handle
+    // whose `.render()` produces the Prometheus exposition text on demand.
+    // We skip the crate's `.with_http_listener(...)` so we can serve
+    // `/metrics`, `/health`, and `/ready` from a single hand-rolled
+    // dispatcher on the same port.
+    let handle = PrometheusBuilder::new()
         .set_buckets(LATENCY_BUCKETS_MS)?
-        .with_http_listener(addr)
-        .install()?;
+        .install_recorder()?;
     START_TIME.set(Instant::now()).ok();
     describe_all();
     emit_build_info();
+
+    // Spawn the admin-port HTTP listener on a bare `std::thread` so it owns
+    // its own tokio runtime — same rationale as retention/metrics tests:
+    // callers of `init` from a `#[tokio::test]` context tear down their
+    // runtime with the test, which would kill an inherited-runtime listener.
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("metrics admin-port runtime build failed: {e:?}");
+                return;
+            }
+        };
+        rt.block_on(async move {
+            if let Err(e) = serve_admin(addr, handle).await {
+                log::error!("metrics admin-port listener exited: {e:?}");
+            }
+        });
+    });
+
+    Ok(())
+}
+
+/// Accept loop for the admin HTTP endpoint. Routes:
+///
+/// - `GET /metrics` → 200, `text/plain; version=0.0.4`, body from the Prometheus handle.
+/// - `GET /health`  → 200, `text/plain`, body `ok`.
+/// - `GET /ready`   → 200 `ok` if [`is_ready`], else 503 `not ready`.
+/// - anything else  → 404.
+///
+/// Deliberately hand-rolled instead of pulling in `hyper` or `axum` — we
+/// serve three static routes with fixed responses; the entire request-parse
+/// path fits inline.
+async fn serve_admin(
+    addr: std::net::SocketAddr,
+    handle: metrics_exporter_prometheus::PrometheusHandle,
+) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    loop {
+        let (sock, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::warn!("admin accept error: {e:?}");
+                continue;
+            }
+        };
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_admin_conn(sock, handle).await {
+                log::debug!("admin conn error: {e:?}");
+            }
+        });
+    }
+}
+
+async fn handle_admin_conn(
+    mut sock: tokio::net::TcpStream,
+    handle: metrics_exporter_prometheus::PrometheusHandle,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Read up to the end of the request line — we don't need headers or body
+    // for any of our routes. Bounded to 8 KiB so a hostile client can't DoS
+    // us into unbounded allocation.
+    let mut buf = [0u8; 8192];
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            let _ = sock
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sock.read(&mut buf[filled..]),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "admin read timeout"))??;
+        if n == 0 {
+            return Ok(());
+        }
+        filled += n;
+        if buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf[..filled].contains(&b'\n') && buf[..filled].contains(&b'\r') {
+            // Have at least one line; try to parse the request line even
+            // without full headers so short requests don't hang.
+            break;
+        }
+    }
+    let request = std::str::from_utf8(&buf[..filled]).unwrap_or("");
+    let request_line = request.lines().next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    let response = match (method, path) {
+        ("GET", "/metrics") => {
+            let body = handle.render();
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        }
+        ("GET", "/health") => {
+            let body = "ok";
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        }
+        ("GET", "/ready") => {
+            let (status, body) = if is_ready() {
+                ("200 OK", "ok")
+            } else {
+                ("503 Service Unavailable", "not ready")
+            };
+            format!(
+                "HTTP/1.1 {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            )
+        }
+        _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+    };
+    sock.write_all(response.as_bytes()).await?;
+    sock.shutdown().await.ok();
     Ok(())
 }
 
@@ -379,6 +538,18 @@ mod tests {
         for w in LATENCY_BUCKETS_MS.windows(2) {
             assert!(w[0] < w[1], "buckets not monotonic: {w:?}");
         }
+    }
+
+    #[test]
+    fn set_ready_toggles_flag() {
+        // Test-local: keep the global static in a known state around this test.
+        // No cross-test synchronization needed because no other unit test
+        // reads or writes READY.
+        set_ready(false);
+        assert!(!is_ready(), "expected READY=false after set_ready(false)");
+        set_ready(true);
+        assert!(is_ready(), "expected READY=true after set_ready(true)");
+        set_ready(false); // reset for cleanliness
     }
 
     #[test]

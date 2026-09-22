@@ -3,7 +3,9 @@ data_dir = "./data"
 
 [ports]
 wire = [5432]
-# Uncomment to enable Prometheus metrics scrape endpoint:
+# Uncomment to enable the admin HTTP endpoint on this port.
+# Serves `/metrics` (Prometheus scrape), `/health` (liveness, always 200),
+# and `/ready` (readiness, 503 until wire listeners are up).
 # metrics = 9464
 
 [broker]

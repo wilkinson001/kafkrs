@@ -4,6 +4,16 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.0] — 2026-09-22
+
+Tracks the broker's 0.6.0 release. See `docs/superpowers/specs/2026-09-22-delete-topic-design.md`.
+
+### Added
+- `Client.delete_topic(name: str, delete_data: bool = True) -> None` — new async method mirroring the DeleteTopic wire RPC.
+
+### Changed
+- Regenerated `kafkrs/wire/v1_pb2.py` with `DeleteTopicRequest` (field 50) and `DeleteTopicResponse` (field 51).
+
 ## [0.5.0] — 2026-09-21
 
 Tracks the broker's 0.5.0 release. No Python API changes. See `docs/superpowers/specs/2026-09-21-metrics-design.md`.

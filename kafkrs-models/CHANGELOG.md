@@ -4,6 +4,19 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.6.0] — 2026-09-22
+
+DeleteTopic support with breaking on-disk-format change. See `docs/superpowers/specs/2026-09-22-delete-topic-design.md`.
+
+### Changed
+- **BREAKING (on-disk format)**: object-store keys now include a `v=<uuid>/` segment between the topic name and `partition=N`. Old 0.5.0 data cannot be read by 0.6.0.
+- **BREAKING (registry schema)**: `TopicEntry` gains a required `uuid: String` field. Legacy `topics.json` files from 0.5.0 fail to parse. Operators upgrading must delete `data_dir` (and the object-store bucket) before starting 0.6.0.
+
+### Added
+- `TopicEntry.uuid: String` (UUIDv7, assigned at CreateTopic time).
+- `uuid = { version = "1", features = ["v7", "serde"] }` dependency.
+- New proto messages: `DeleteTopicRequest` (field 50), `DeleteTopicResponse` (field 51). Command reserved range shrinks to `52 to 59`.
+
 ## [0.5.0] — 2026-09-21
 
 Breaking config schema change to support the new metrics endpoint. See `docs/superpowers/specs/2026-09-21-metrics-design.md`.

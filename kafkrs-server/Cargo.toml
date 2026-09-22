@@ -48,6 +48,7 @@ thiserror = "2.0.18"
 tokio-stream = "0.1.18"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"

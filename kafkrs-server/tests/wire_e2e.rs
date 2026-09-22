@@ -2152,9 +2152,9 @@ async fn metadata_empty_filter_returns_all_topics_and_self_broker() {
     // Metadata request with empty filter.
     let md = Command {
         correlation_id: 2,
-        body: Some(Body::Metadata(
-            kafkrs_models::wire::v1::MetadataRequest { topics: vec![] },
-        )),
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec![],
+        })),
     };
     sock.write_all(&encode(&md, b"")).await.unwrap();
     let (resp, _) = read_frame(&mut sock).await;
@@ -2167,7 +2167,10 @@ async fn metadata_empty_filter_returns_all_topics_and_self_broker() {
             assert_eq!(m.brokers[0].port, 5432);
             // setup_broker seeds topic "t" — expect at least that.
             let names: Vec<&str> = m.topics.iter().map(|t| t.topic.as_str()).collect();
-            assert!(names.contains(&"t"), "expected topic 't' in metadata, got {names:?}");
+            assert!(
+                names.contains(&"t"),
+                "expected topic 't' in metadata, got {names:?}"
+            );
             let t = m.topics.iter().find(|t| t.topic == "t").unwrap();
             assert_eq!(t.error_code, 0);
             assert!(!t.topic_uuid.is_empty());
@@ -2198,11 +2201,9 @@ async fn metadata_filter_returns_only_requested_topics() {
 
     let md = Command {
         correlation_id: 2,
-        body: Some(Body::Metadata(
-            kafkrs_models::wire::v1::MetadataRequest {
-                topics: vec!["t".into()],
-            },
-        )),
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["t".into()],
+        })),
     };
     sock.write_all(&encode(&md, b"")).await.unwrap();
     let (resp, _) = read_frame(&mut sock).await;
@@ -2236,11 +2237,9 @@ async fn metadata_filter_with_unknown_topic_returns_per_topic_error() {
 
     let md = Command {
         correlation_id: 2,
-        body: Some(Body::Metadata(
-            kafkrs_models::wire::v1::MetadataRequest {
-                topics: vec!["t".into(), "no-such-topic".into()],
-            },
-        )),
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["t".into(), "no-such-topic".into()],
+        })),
     };
     sock.write_all(&encode(&md, b"")).await.unwrap();
     let (resp, _) = read_frame(&mut sock).await;
@@ -2297,11 +2296,9 @@ async fn metadata_partition_metadata_lists_self_as_leader_for_every_partition() 
 
     let md = Command {
         correlation_id: 3,
-        body: Some(Body::Metadata(
-            kafkrs_models::wire::v1::MetadataRequest {
-                topics: vec!["multi".into()],
-            },
-        )),
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["multi".into()],
+        })),
     };
     sock.write_all(&encode(&md, b"")).await.unwrap();
     let (resp, _) = read_frame(&mut sock).await;

@@ -36,12 +36,25 @@ pub enum RegistryMsg {
         partition_count: u32,
         reply: oneshot::Sender<Result<String, RegistryError>>,
     },
+    /// Remove a topic's registry entry and persist `topics.json`. This is
+    /// only the registry's slice of DeleteTopic: actor shutdown, WAL
+    /// removal, manifest snapshot, and sweep spawn are orchestrated by
+    /// `wire/dispatch.rs::handle_delete_topic`, which has access to
+    /// `SharedState`. The registry stays focused on its file-of-truth role.
+    /// `delete_data` is carried through for uniformity but unused here — the
+    /// dispatch handler decides sweep vs skip based on it.
+    Delete {
+        name: String,
+        delete_data: bool,
+        reply: oneshot::Sender<Result<(), RegistryError>>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
 pub enum RegistryError {
     AlreadyExists,
     Io(String),
+    UnknownTopic,
 }
 
 pub struct TopicRegistry {
@@ -123,6 +136,32 @@ impl TopicRegistry {
                 RegistryMsg::List { reply } => {
                     let _ = reply.send(self.topics.keys().cloned().collect());
                 }
+                RegistryMsg::Delete {
+                    name,
+                    delete_data: _,
+                    reply,
+                } => {
+                    let _ = reply.send(self.delete(&name).await);
+                }
+            }
+        }
+    }
+
+    async fn delete(&mut self, name: &str) -> Result<(), RegistryError> {
+        let entry = match self.topics.remove(name) {
+            None => return Err(RegistryError::UnknownTopic),
+            Some(e) => e,
+        };
+        let next: TopicRegistryFile = TopicRegistryFile {
+            topics: self.topics.values().cloned().collect(),
+        };
+        match atomic_write_registry(&self.data_dir, &next) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Persistence failed — roll back the in-memory removal so the
+                // registry stays consistent with topics.json on disk.
+                self.topics.insert(name.to_string(), entry);
+                Err(RegistryError::Io(e.to_string()))
             }
         }
     }

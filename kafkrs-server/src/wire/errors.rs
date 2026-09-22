@@ -28,6 +28,7 @@ pub fn registry_error_code(e: &RegistryError) -> ErrorCode {
     match e {
         RegistryError::AlreadyExists => ErrorCode::ErrTopicAlreadyExists,
         RegistryError::Io(_) => ErrorCode::ErrInternal,
+        RegistryError::UnknownTopic => ErrorCode::ErrUnknownTopic,
     }
 }
 

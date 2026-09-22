@@ -20,9 +20,9 @@ use kafkrs_models::topic::{
     ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel,
 };
 use kafkrs_models::wire::v1::{
-    command::Body, Command, ConnectedResponse, CreateTopicResponse, DescribeTopicResponse,
-    ErrorCode, FetchResponse, ListTopicsResponse, OutRecordMeta, PongResponse, ProduceResponse,
-    TopicConfigOverrides,
+    command::Body, Command, ConnectedResponse, CreateTopicResponse, DeleteTopicResponse,
+    DescribeTopicResponse, ErrorCode, FetchResponse, ListTopicsResponse, OutRecordMeta,
+    PongResponse, ProduceResponse, TopicConfigOverrides,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -182,6 +182,31 @@ pub async fn handle_produce(
             Ok(Err(RegistryError::AlreadyExists)) => {
                 // Topic existed before this produce, so its partition workers were
                 // spawned by a prior CreateTopic or EnsureExists call. Nothing to do.
+            }
+            Ok(Err(RegistryError::UnknownTopic)) => {
+                // EnsureExists never returns UnknownTopic (that variant is only
+                // produced by Delete); unreachable in practice, but the shared
+                // RegistryError type requires this arm to be exhaustive.
+                metrics::counter!(
+                    PRODUCE_ERRORS,
+                    &partition_label_with(
+                        &topic,
+                        partition,
+                        &[(
+                            LABEL_ERROR_CODE,
+                            format!("{}", ErrorCode::ErrInternal as i32)
+                        )],
+                    )
+                )
+                .increment(1);
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        ErrorCode::ErrInternal,
+                        "auto-create failed: unexpected UnknownTopic",
+                    ),
+                    payload: Bytes::new(),
+                };
             }
             Ok(Err(RegistryError::Io(msg))) => {
                 metrics::counter!(
@@ -660,6 +685,191 @@ pub async fn handle_list_topics(correlation_id: u64, state: &SharedState) -> Fra
         command: Command {
             correlation_id,
             body: Some(Body::ListTopicsResp(ListTopicsResponse { topics })),
+        },
+        payload: Bytes::new(),
+    }
+}
+
+pub async fn handle_delete_topic(
+    correlation_id: u64,
+    state: &SharedState,
+    req: kafkrs_models::wire::v1::DeleteTopicRequest,
+) -> Frame {
+    let topic = req.topic.clone();
+    let delete_data = req.delete_data.unwrap_or(true);
+
+    // Capture the UUID + partition count BEFORE the registry removes the
+    // entry, because we need them to look up partition handles and to
+    // construct keys for the manifest snapshot below.
+    let describe_reply = {
+        let (tx, rx) = oneshot::channel();
+        if state
+            .registry
+            .send(RegistryMsg::Describe {
+                name: topic.clone(),
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+        rx.await.ok().flatten()
+    };
+    let entry = match describe_reply {
+        None => {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
+                payload: Bytes::new(),
+            };
+        }
+        Some(e) => e,
+    };
+    let topic_uuid = entry.uuid.clone();
+    let partition_count = entry.partition_count;
+
+    // Ask the registry to atomically remove + persist. If Describe raced
+    // with a concurrent Delete, this call gets UnknownTopic.
+    let del_reply = {
+        let (tx, rx) = oneshot::channel();
+        if state
+            .registry
+            .send(RegistryMsg::Delete {
+                name: topic.clone(),
+                delete_data,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+        rx.await.ok()
+    };
+    match del_reply {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            return Frame {
+                command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
+                payload: Bytes::new(),
+            };
+        }
+        None => {
+            return Frame {
+                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                payload: Bytes::new(),
+            };
+        }
+    }
+
+    // Registry entry is gone. Now shut down partition actors, remove them
+    // from state.partitions, clean spawn_locks, remove the WAL directory,
+    // and (if delete_data) snapshot manifests + append a pending-delete
+    // record + spawn the sweep.
+    let mut handles_to_shutdown: Vec<PartitionHandle> =
+        Vec::with_capacity(partition_count as usize);
+    {
+        let mut guard = state.partitions.write().await;
+        for p in 0..partition_count {
+            if let Some(h) = guard.remove(&(topic.clone(), p)) {
+                handles_to_shutdown.push(h);
+            }
+        }
+    }
+
+    // Send Shutdown to each partition writer and await its ack so the WAL
+    // and manifest state are quiesced before this RPC responds.
+    for h in &handles_to_shutdown {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = h.pw_tx.send(PwMsg::Shutdown { ack: ack_tx }).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+    }
+
+    // Clean up spawn_locks entries for this topic's partitions.
+    {
+        let mut locks = state.spawn_locks.lock().unwrap();
+        for p in 0..partition_count {
+            locks.remove(&(topic.clone(), p));
+        }
+    }
+
+    // Remove the WAL directory for this topic.
+    let wal_dir = std::path::Path::new(&state.data_dir)
+        .join("wal")
+        .join(&topic);
+    if wal_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&wal_dir).await {
+            log::warn!("failed to remove WAL dir {}: {e:?}", wal_dir.display());
+        }
+    }
+
+    if delete_data {
+        use crate::deletion::sweep_deletion;
+        use crate::object_store::{get, manifest_key};
+        use crate::pending_deletes::{append, PendingDelete};
+        use kafkrs_models::manifest::Manifest;
+        use std::collections::BTreeMap;
+
+        let mut manifests_by_partition: BTreeMap<u32, Manifest> = BTreeMap::new();
+        for p in 0..partition_count {
+            let mkey = manifest_key(&state.prefix, &topic, &topic_uuid, p);
+            match get(&state.store, &mkey).await {
+                Ok(bytes) => {
+                    if let Ok(m) = serde_json::from_slice::<Manifest>(&bytes) {
+                        manifests_by_partition.insert(p, m);
+                    }
+                }
+                Err(_) => {
+                    // Manifest missing (partition may never have uploaded).
+                    manifests_by_partition.insert(p, Manifest::empty(&topic, p));
+                }
+            }
+        }
+
+        let record = PendingDelete {
+            topic: topic.clone(),
+            uuid: topic_uuid.clone(),
+            manifests_by_partition,
+            created_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0),
+        };
+        if let Err(e) = append(&state.data_dir, record.clone()).await {
+            log::warn!("failed to persist pending_deletes.json: {e:?}");
+            return Frame {
+                command: make_error(
+                    correlation_id,
+                    ErrorCode::ErrInternal,
+                    format!("pending_deletes persistence failed: {e:?}"),
+                ),
+                payload: Bytes::new(),
+            };
+        }
+
+        metrics::gauge!(crate::metrics::DELETE_PENDING_TOPICS).increment(1.0);
+
+        let store = state.store.clone();
+        let prefix = state.prefix.clone();
+        let data_dir = state.data_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sweep_deletion(record, store, prefix, data_dir).await {
+                log::warn!("sweep_deletion failed: {e:?}");
+                // Pending record stays in pending_deletes.json; next boot replays.
+            }
+        });
+    }
+
+    Frame {
+        command: Command {
+            correlation_id,
+            body: Some(Body::DeleteTopicResp(DeleteTopicResponse {})),
         },
         payload: Bytes::new(),
     }

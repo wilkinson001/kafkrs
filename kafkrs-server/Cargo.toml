@@ -46,6 +46,8 @@ prost = "0.14.3"
 tokio-util = { version = "0.7.18", features = ["codec"] }
 thiserror = "2.0.18"
 tokio-stream = "0.1.18"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 
 [dev-dependencies]
 tempfile = "3"

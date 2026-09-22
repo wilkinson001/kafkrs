@@ -55,6 +55,12 @@ pub enum LocateResult {
 pub struct PartitionWriter {
     data_dir: String,
     topic: String,
+    /// Not read directly by `PartitionWriter` today (only the Uploader builds
+    /// segment/manifest keys); kept here so the writer's identity matches the
+    /// rest of the partition actor chain and is available to later
+    /// DeleteTopic work (e.g. self-description in logs/metrics).
+    #[allow(dead_code)]
+    topic_uuid: String,
     partition: u32,
     cfg: ResolvedTopicConfig,
     next_offset: i64,
@@ -78,6 +84,7 @@ impl PartitionWriter {
     pub fn new(
         data_dir: String,
         topic: String,
+        topic_uuid: String,
         partition: u32,
         cfg: ResolvedTopicConfig,
         start_offset: i64,
@@ -99,6 +106,7 @@ impl PartitionWriter {
         let pw = PartitionWriter {
             data_dir,
             topic,
+            topic_uuid,
             partition,
             cfg,
             next_offset: start_offset,
@@ -364,16 +372,40 @@ mod tests {
         .unwrap();
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", "01936a80-0000-7000-8000-000000000000", 0),
             bytes::Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
         )
         .await
         .unwrap();
-        tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, cfg, urx, dtx).run());
+        tokio::spawn(
+            Uploader::new(
+                store,
+                "".into(),
+                "t".into(),
+                "01936a80-0000-7000-8000-000000000000".into(),
+                0,
+                cfg,
+                urx,
+                dtx,
+            )
+            .run(),
+        );
 
         let (tx, rx) = mpsc::channel(8);
         let (ttx, _trx) = broadcast::channel(16);
-        let pw = PartitionWriter::new(dd, "t".into(), 0, cfg, 0, vec![], rx, utx, ttx).unwrap();
+        let pw = PartitionWriter::new(
+            dd,
+            "t".into(),
+            "01936a80-0000-7000-8000-000000000000".into(),
+            0,
+            cfg,
+            0,
+            vec![],
+            rx,
+            utx,
+            ttx,
+        )
+        .unwrap();
         tokio::spawn(pw.run());
 
         let (atx, arx) = oneshot::channel();

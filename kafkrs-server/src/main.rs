@@ -59,11 +59,12 @@ async fn main() {
 
     // Bring up each known partition independently (spec risk: startup must not
     // serialize on the slowest manifest GET — each task is independent).
-    for (topic, pcount, rtc) in known {
+    for (topic, uuid, pcount, rtc) in known {
         for p in 0..pcount {
             spawn_partition(
                 &cfg.data_dir,
                 &topic,
+                uuid.clone(),
                 p,
                 rtc,
                 store.clone(),

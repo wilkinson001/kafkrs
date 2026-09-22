@@ -7,6 +7,8 @@ use kafkrs_server::partition_writer::{IncomingRecord, PartitionWriter, PwMsg};
 use kafkrs_server::uploader::Uploader;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+const TOPIC_UUID: &str = "01936a80-0000-7000-8000-000000000000";
+
 async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Sender<i64>) {
     let store = build_store(
         &ObjectStoreConfig {
@@ -21,7 +23,7 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
     .unwrap();
     put(
         &store,
-        &manifest_key("", "t", 0),
+        &manifest_key("", "t", TOPIC_UUID, 0),
         Bytes::from(serde_json::to_vec(&Manifest::empty("t", 0)).unwrap()),
     )
     .await
@@ -36,7 +38,19 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
 
     let (utx, urx) = mpsc::channel(64);
     let (dtx, mut drx) = mpsc::channel(64);
-    tokio::spawn(Uploader::new(store, "".into(), "t".into(), 0, cfg, urx, dtx).run());
+    tokio::spawn(
+        Uploader::new(
+            store,
+            "".into(),
+            "t".into(),
+            TOPIC_UUID.into(),
+            0,
+            cfg,
+            urx,
+            dtx,
+        )
+        .run(),
+    );
 
     let (pw_tx, pw_rx) = mpsc::channel(256);
     let (tail, _) = broadcast::channel(1024);
@@ -49,6 +63,7 @@ async fn setup(dd: &str, seal_bytes: u64) -> (mpsc::Sender<PwMsg>, broadcast::Se
     let pw = PartitionWriter::new(
         dd.into(),
         "t".into(),
+        TOPIC_UUID.into(),
         0,
         cfg,
         0,
@@ -104,7 +119,7 @@ async fn produce_seals_uploads_and_is_recoverable() {
         &dd,
     )
     .unwrap();
-    let r = kafkrs_server::recovery::recover_partition(&dd, "t", 0, &store, "")
+    let r = kafkrs_server::recovery::recover_partition(&dd, "t", TOPIC_UUID, 0, &store, "")
         .await
         .unwrap();
     // next_offset must cover everything produced (10 records → offsets 0..=9)

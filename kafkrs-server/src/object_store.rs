@@ -60,7 +60,9 @@ fn join(prefix: &str, topic: &str, topic_uuid: &str, partition: u32, leaf: &str)
         s.push_str(prefix.trim_end_matches('/'));
         s.push('/');
     }
-    s.push_str(&format!("{topic}/v={topic_uuid}/partition={partition}/{leaf}"));
+    s.push_str(&format!(
+        "{topic}/v={topic_uuid}/partition={partition}/{leaf}"
+    ));
     ObjPath::from(s)
 }
 
@@ -97,7 +99,13 @@ mod tests {
             k.to_string(),
             "orders/v=01936a80-0000-7000-8000-000000000000/partition=3/segment-00000000000000000100.parquet"
         );
-        let k2 = segment_key("env/v1", "orders", "01936a80-0000-7000-8000-000000000000", 0, 0);
+        let k2 = segment_key(
+            "env/v1",
+            "orders",
+            "01936a80-0000-7000-8000-000000000000",
+            0,
+            0,
+        );
         assert_eq!(
             k2.to_string(),
             "env/v1/orders/v=01936a80-0000-7000-8000-000000000000/partition=0/segment-00000000000000000000.parquet"

@@ -40,14 +40,17 @@ pub const BROKER_ID: &str = "kafkrs-broker-v1";
 
 /// Handle to a partition's actor: an mpsc sender for the PartitionWriter,
 /// a broadcast sender for tail subscribers, the resolved per-topic config
-/// (for wire-layer limit enforcement), and an mpsc sender for the Uploader
-/// (used by the RetentionSweeper to enqueue kicks).
+/// (for wire-layer limit enforcement), an mpsc sender for the Uploader
+/// (used by the RetentionSweeper to enqueue kicks), and the topic's UUID
+/// (isolates topic incarnations across a Delete + re-Create of the same
+/// topic name so segment/manifest keys never collide).
 #[derive(Clone)]
 pub struct PartitionHandle {
     pub pw_tx: mpsc::Sender<PwMsg>,
     pub tail: broadcast::Sender<i64>,
     pub cfg: ResolvedTopicConfig,
     pub uploader_tx: mpsc::Sender<crate::uploader::UploaderMsg>,
+    pub uuid: String,
 }
 
 /// Shared state available to every per-connection task.
@@ -161,10 +164,14 @@ pub async fn handle_produce(
                     &TopicConfigOverridesModel::default(),
                     state.disk_type.clone(),
                 );
+                // TODO(task 5): pass the UUID assigned by the registry's
+                // EnsureExists response instead of this placeholder.
+                let uuid = "TODO-task-5".to_string();
                 for p in 0..state.default_partition_count {
                     spawn_partition(
                         &state.data_dir,
                         &topic,
+                        uuid.clone(),
                         p,
                         cfg,
                         state.store.clone(),
@@ -467,6 +474,7 @@ pub async fn handle_fetch(
     let result = fetch(
         FetchRequest {
             topic: req.topic,
+            topic_uuid: handle.uuid.clone(),
             partition: req.partition,
             from_offset: req.from_offset,
             max_records: req.max_records as usize,
@@ -564,10 +572,14 @@ pub async fn handle_create_topic(
     match rx.await {
         Ok(Ok(())) => {
             // Spawn partition workers so subsequent Produce/Fetch RPCs find them.
+            // TODO(task 5): pass the UUID assigned by the registry's Create
+            // response instead of this placeholder.
+            let uuid = "TODO-task-5".to_string();
             for p in 0..partition_count {
                 spawn_partition(
                     &state.data_dir,
                     &topic_name,
+                    uuid.clone(),
                     p,
                     resolved_cfg,
                     state.store.clone(),

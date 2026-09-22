@@ -136,6 +136,8 @@ impl TopicRegistry {
         }
         let entry: TopicEntry = TopicEntry {
             name: name.to_string(),
+            // TODO(task 5): assign a real UUIDv7 here (topic-create identity).
+            uuid: String::new(),
             partition_count,
             created_at_ns: now_ns(),
             config: overrides,
@@ -158,7 +160,7 @@ impl TopicRegistry {
         }
         // Step 3: empty manifest per partition.
         for p in 0..partition_count {
-            let key: ObjPath = manifest_key(&self.prefix, name, p);
+            let key: ObjPath = manifest_key(&self.prefix, name, &entry.uuid, p);
             let body: Vec<u8> = serde_json::to_vec(&Manifest::empty(name, p))
                 .map_err(|e| RegistryError::Io(e.to_string()))?;
             put(&self.store, &key, bytes::Bytes::from(body))
@@ -171,12 +173,13 @@ impl TopicRegistry {
 }
 
 impl TopicRegistry {
-    pub fn snapshot(&self) -> Vec<(String, u32, ResolvedTopicConfig)> {
+    pub fn snapshot(&self) -> Vec<(String, String, u32, ResolvedTopicConfig)> {
         self.topics
             .values()
             .map(|t| {
                 (
                     t.name.clone(),
+                    t.uuid.clone(),
                     t.partition_count,
                     ResolvedTopicConfig::resolve(&t.config, self.disk.clone()),
                 )
@@ -252,7 +255,7 @@ mod tests {
         assert!(Path::new(&dd).join("wal/orders/0").exists());
         assert!(Path::new(&dd).join("wal/orders/1").exists());
         // empty manifests exist
-        let raw = crate::object_store::get(&store(dir.path()), &manifest_key("", "orders", 1))
+        let raw = crate::object_store::get(&store(dir.path()), &manifest_key("", "orders", "", 1))
             .await
             .unwrap();
         let m: Manifest = serde_json::from_slice(&raw).unwrap();

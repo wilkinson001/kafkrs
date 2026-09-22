@@ -24,6 +24,7 @@ pub enum FetchError {
 
 pub struct FetchRequest {
     pub topic: String,
+    pub topic_uuid: String,
     pub partition: u32,
     pub from_offset: i64,
     pub max_records: usize,
@@ -170,7 +171,7 @@ async fn read_object_store(
     store: &Arc<dyn ObjectStore>,
     prefix: &str,
 ) -> Result<FetchResponse, FetchError> {
-    let m_key: ObjPath = manifest_key(prefix, &req.topic, req.partition);
+    let m_key: ObjPath = manifest_key(prefix, &req.topic, &req.topic_uuid, req.partition);
     let raw: Bytes = get(store, &m_key)
         .await
         .map_err(|_| FetchError::UnknownTopic)?;
@@ -179,7 +180,13 @@ async fn read_object_store(
     let seg: &SegmentEntry = manifest
         .segment_for_offset(req.from_offset)
         .ok_or(FetchError::OffsetOutOfRange)?;
-    let key: ObjPath = segment_key(prefix, &req.topic, req.partition, seg.base_offset);
+    let key: ObjPath = segment_key(
+        prefix,
+        &req.topic,
+        &req.topic_uuid,
+        req.partition,
+        seg.base_offset,
+    );
     let bytes: Bytes = get(store, &key)
         .await
         .map_err(|_| FetchError::BrokerNotReady)?;
@@ -272,6 +279,7 @@ mod tests {
         let err = fetch(
             FetchRequest {
                 topic: "t".into(),
+                topic_uuid: "01936a80-0000-7000-8000-000000000000".into(),
                 partition: 0,
                 from_offset: -1,
                 max_records: 10,
@@ -312,9 +320,13 @@ mod tests {
             .collect();
         let bytes = write_segment(&recs).unwrap();
         let byte_size = bytes.len() as u64;
-        put(&store, &segment_key("", "t", 0, 0), bytes)
-            .await
-            .unwrap();
+        put(
+            &store,
+            &segment_key("", "t", "01936a80-0000-7000-8000-000000000000", 0, 0),
+            bytes,
+        )
+        .await
+        .unwrap();
         let mut m = Manifest::empty("t", 0);
         m.segments.push(SegmentEntry {
             base_offset: 0,
@@ -327,7 +339,7 @@ mod tests {
         });
         put(
             &store,
-            &manifest_key("", "t", 0),
+            &manifest_key("", "t", "01936a80-0000-7000-8000-000000000000", 0),
             bytes::Bytes::from(serde_json::to_vec(&m).unwrap()),
         )
         .await
@@ -346,6 +358,7 @@ mod tests {
         let resp = fetch(
             FetchRequest {
                 topic: "t".into(),
+                topic_uuid: "01936a80-0000-7000-8000-000000000000".into(),
                 partition: 0,
                 from_offset: 5,
                 max_records: 100,

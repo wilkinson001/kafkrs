@@ -170,6 +170,24 @@ class Client:
         if resp.WhichOneof("body") != "create_topic_resp":
             raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
 
+    async def delete_topic(self, name: str, delete_data: bool = True) -> None:
+        """Delete a topic.
+
+        If delete_data is True (default), WAL files and object-store data are
+        also removed asynchronously by a broker-side sweep. If False, only the
+        registry entry and running actors are torn down; storage is left for
+        the caller to manage out-of-band.
+        """
+        cmd = v1_pb2.Command()
+        cmd.correlation_id = self._next_id()
+        cmd.delete_topic.topic = name
+        cmd.delete_topic.delete_data = delete_data
+        resp, _ = await self._roundtrip(cmd, b"")
+        if resp.WhichOneof("body") == "error":
+            raise WireError(resp.error.code, resp.error.message)
+        if resp.WhichOneof("body") != "delete_topic_resp":
+            raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
+
     async def list_topics(self) -> List[str]:
         cmd = v1_pb2.Command()
         cmd.correlation_id = self._next_id()

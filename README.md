@@ -34,7 +34,7 @@ Producer ack is gated on WAL `fsync` only; object-store upload is asynchronous. 
 
 **Metrics.** When `ports.metrics` is set, the broker exposes 37 metrics on a Prometheus scrape endpoint. Naming follows OpenTelemetry `messaging.*` semantic conventions on the producer/consumer surface; broker-internal state uses a `kafkrs.*` prefix. Every metric name and label key is a `pub const` in `kafkrs-server::metrics` so future renames are one-edit. Per-topic labels always; per-partition labels are behind `broker.metrics_high_cardinality = true`. Call sites go through the `metrics` crate façade — swapping the Prometheus exporter for native OTLP push is a config change, not a rewrite.
 
-**Admin endpoints.** The same `ports.metrics` port also serves `/health` (liveness — always returns 200 while the broker is running) and `/ready` (readiness — 503 during startup, 200 once wire listeners are bound and the broker can accept traffic). Suitable for Kubernetes liveness/readiness probes and load-balancer health checks.
+**Admin endpoints.** `ports.health` (independently opt-in from `ports.metrics`) serves `/health` (liveness — always returns 200 while the broker is running) and `/ready` (readiness — 503 during startup, 200 once wire listeners are bound and the broker can accept traffic). Suitable for Kubernetes liveness/readiness probes and load-balancer health checks. Set `ports.health` and `ports.metrics` to the same port value for a single-listener admin surface, or split them for separate ACL / network exposure.
 
 ### `kafkrs-models`
 

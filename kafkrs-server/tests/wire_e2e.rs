@@ -48,6 +48,10 @@ fn init_metrics_once() -> u16 {
             let ports = kafkrs_models::config::PortsConfig {
                 wire: vec![0],
                 metrics: Some(port),
+                // Reuse the same port so /metrics + /health + /ready are
+                // all served on the merged listener — exercises the
+                // same-port coupling path used by the health-endpoint tests.
+                health: Some(port),
             };
             kafkrs_server::metrics::init(&ports, false).expect("metrics init");
             tx.send(port).expect("send port");

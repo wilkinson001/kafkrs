@@ -13,8 +13,15 @@ pub struct Config {
 #[derive(Deserialize, Debug, Clone)]
 pub struct PortsConfig {
     pub wire: Vec<u16>,
+    /// Prometheus scrape endpoint (`GET /metrics`). Opt-in.
     #[serde(default)]
     pub metrics: Option<u16>,
+    /// Liveness + readiness endpoints (`GET /health` + `GET /ready`). Opt-in.
+    /// Independent from `metrics` so operators can run K8s probes without
+    /// exposing Prometheus scrape traffic. If set to the same port value as
+    /// `metrics`, one listener serves the merged route set.
+    #[serde(default)]
+    pub health: Option<u16>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -207,6 +214,63 @@ bucket = "b"
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.ports.wire, vec![5432]);
         assert_eq!(cfg.ports.metrics, Some(9464));
+    }
+
+    #[test]
+    fn ports_health_parses_when_set() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+health = 9465
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.ports.wire, vec![5432]);
+        assert_eq!(cfg.ports.metrics, None);
+        assert_eq!(cfg.ports.health, Some(9465));
+    }
+
+    #[test]
+    fn ports_metrics_and_health_can_coexist() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+metrics = 9464
+health = 9465
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.ports.metrics, Some(9464));
+        assert_eq!(cfg.ports.health, Some(9465));
+    }
+
+    #[test]
+    fn ports_health_defaults_none() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.ports.health, None);
     }
 
     #[test]

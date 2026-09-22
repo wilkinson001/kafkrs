@@ -3,10 +3,10 @@ data_dir = "./data"
 
 [ports]
 wire = [5432]
-# Uncomment to enable the admin HTTP endpoint on this port.
-# Serves `/metrics` (Prometheus scrape), `/health` (liveness, always 200),
-# and `/ready` (readiness, 503 until wire listeners are up).
-# metrics = 9464
+# Optional admin HTTP endpoints — each is independently opt-in.
+# If both are set to the same port value, one listener serves the merged routes.
+# metrics = 9464   # Prometheus scrape endpoint (GET /metrics)
+# health  = 9465   # Liveness + readiness (GET /health, GET /ready)
 
 [broker]
 disk_type = "nvme"

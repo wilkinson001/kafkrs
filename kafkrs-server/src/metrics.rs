@@ -111,8 +111,17 @@ pub(crate) fn is_ready() -> bool {
     READY.load(Ordering::Relaxed)
 }
 
-/// Install the global Prometheus recorder and start the HTTP scrape listener.
-/// No-op (returns `Ok(())`) when `ports.metrics` is `None`.
+/// Install the global Prometheus recorder (when `ports.metrics` is set) and
+/// spawn any admin-port HTTP listeners implied by `ports.metrics` /
+/// `ports.health`:
+///
+/// - Neither set → no listeners, no recorder. No-op.
+/// - Only `metrics` set → one listener on that port, serving only `/metrics`.
+/// - Only `health` set → one listener on that port, serving only `/health` +
+///   `/ready`. No recorder installed.
+/// - Both set to different ports → two listeners, each serving its own subset.
+/// - Both set to the same port value → one listener serving the merged route
+///   set (`/metrics` + `/health` + `/ready`).
 ///
 /// Does not spawn the uptime-updater background task itself — `init` must
 /// stay usable without an ambient tokio runtime (see the test helper in
@@ -121,63 +130,91 @@ pub(crate) fn is_ready() -> bool {
 /// [`uptime_updater`] themselves alongside the `init` call.
 pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
     HIGH_CARDINALITY.store(high_cardinality, Ordering::Relaxed);
-    let Some(port) = ports.metrics else {
-        return Ok(());
+
+    // If metrics is opted in, install the recorder and grab its handle.
+    let prom_handle = if let Some(_port) = ports.metrics {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+        let handle = PrometheusBuilder::new()
+            .set_buckets(LATENCY_BUCKETS_MS)?
+            .install_recorder()?;
+        START_TIME.set(Instant::now()).ok();
+        describe_all();
+        emit_build_info();
+        Some(handle)
+    } else {
+        None
     };
-    use metrics_exporter_prometheus::PrometheusBuilder;
-    use std::net::SocketAddr;
 
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    // `install_recorder()` installs the global recorder and returns a handle
-    // whose `.render()` produces the Prometheus exposition text on demand.
-    // We skip the crate's `.with_http_listener(...)` so we can serve
-    // `/metrics`, `/health`, and `/ready` from a single hand-rolled
-    // dispatcher on the same port.
-    let handle = PrometheusBuilder::new()
-        .set_buckets(LATENCY_BUCKETS_MS)?
-        .install_recorder()?;
-    START_TIME.set(Instant::now()).ok();
-    describe_all();
-    emit_build_info();
+    // Plan (port, serves_metrics, serves_health) for each unique admin port.
+    let listeners = plan_admin_listeners(ports);
 
-    // Spawn the admin-port HTTP listener on a bare `std::thread` so it owns
-    // its own tokio runtime — same rationale as retention/metrics tests:
-    // callers of `init` from a `#[tokio::test]` context tear down their
-    // runtime with the test, which would kill an inherited-runtime listener.
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                log::error!("metrics admin-port runtime build failed: {e:?}");
-                return;
-            }
+    // Spawn one bare `std::thread` per listener so each owns its own
+    // tokio runtime — same rationale as retention/metrics tests: callers
+    // of `init` from a `#[tokio::test]` context tear down their runtime
+    // with the test, which would kill an inherited-runtime listener.
+    for (port, serves_metrics, serves_health) in listeners {
+        let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+        let handle = if serves_metrics {
+            prom_handle.clone()
+        } else {
+            None
         };
-        rt.block_on(async move {
-            if let Err(e) = serve_admin(addr, handle).await {
-                log::error!("metrics admin-port listener exited: {e:?}");
-            }
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("admin-port {port} runtime build failed: {e:?}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                if let Err(e) = serve_admin(addr, handle, serves_health).await {
+                    log::error!("admin-port {port} listener exited: {e:?}");
+                }
+            });
         });
-    });
+    }
 
     Ok(())
 }
 
-/// Accept loop for the admin HTTP endpoint. Routes:
+/// Given a `PortsConfig`, decide which admin-port HTTP listeners `init`
+/// should spawn. Each returned entry is `(port, serves_metrics,
+/// serves_health)`. Deduped by port value so a single config with
+/// `metrics == health` yields one merged listener.
+fn plan_admin_listeners(ports: &PortsConfig) -> Vec<(u16, bool, bool)> {
+    let mut listeners: Vec<(u16, bool, bool)> = Vec::new();
+    if let Some(mp) = ports.metrics {
+        listeners.push((mp, true, false));
+    }
+    if let Some(hp) = ports.health {
+        if let Some(entry) = listeners.iter_mut().find(|(p, _, _)| *p == hp) {
+            entry.2 = true;
+        } else {
+            listeners.push((hp, false, true));
+        }
+    }
+    listeners
+}
+
+/// Accept loop for an admin HTTP endpoint. Routes served depend on the
+/// listener's role:
 ///
-/// - `GET /metrics` → 200, `text/plain; version=0.0.4`, body from the Prometheus handle.
-/// - `GET /health`  → 200, `text/plain`, body `ok`.
-/// - `GET /ready`   → 200 `ok` if [`is_ready`], else 503 `not ready`.
-/// - anything else  → 404.
+/// - `GET /metrics` → 200 with Prometheus exposition (when `handle` is `Some`).
+/// - `GET /health` → 200 `ok` (when `serve_health` is `true`).
+/// - `GET /ready` → 200 `ok` if [`is_ready`], else 503 `not ready` (when `serve_health` is `true`).
+/// - anything else, including routes this listener isn't configured to serve → 404.
 ///
 /// Deliberately hand-rolled instead of pulling in `hyper` or `axum` — we
-/// serve three static routes with fixed responses; the entire request-parse
-/// path fits inline.
+/// serve at most three static routes with fixed responses; the entire
+/// request-parse path fits inline.
 async fn serve_admin(
     addr: std::net::SocketAddr,
-    handle: metrics_exporter_prometheus::PrometheusHandle,
+    handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    serve_health: bool,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
@@ -190,7 +227,7 @@ async fn serve_admin(
         };
         let handle = handle.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_admin_conn(sock, handle).await {
+            if let Err(e) = handle_admin_conn(sock, handle, serve_health).await {
                 log::debug!("admin conn error: {e:?}");
             }
         });
@@ -199,7 +236,8 @@ async fn serve_admin(
 
 async fn handle_admin_conn(
     mut sock: tokio::net::TcpStream,
-    handle: metrics_exporter_prometheus::PrometheusHandle,
+    handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    serve_health: bool,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -241,15 +279,15 @@ async fn handle_admin_conn(
     let path = parts.next().unwrap_or("");
 
     let response = match (method, path) {
-        ("GET", "/metrics") => {
-            let body = handle.render();
+        ("GET", "/metrics") if handle.is_some() => {
+            let body = handle.as_ref().unwrap().render();
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
         }
-        ("GET", "/health") => {
+        ("GET", "/health") if serve_health => {
             let body = "ok";
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -257,7 +295,7 @@ async fn handle_admin_conn(
                 body
             )
         }
-        ("GET", "/ready") => {
+        ("GET", "/ready") if serve_health => {
             let (status, body) = if is_ready() {
                 ("200 OK", "ok")
             } else {
@@ -553,12 +591,70 @@ mod tests {
     }
 
     #[test]
-    fn init_with_no_metrics_port_is_noop() {
+    fn init_with_no_admin_ports_is_noop() {
         let ports = PortsConfig {
             wire: vec![5432],
             metrics: None,
+            health: None,
         };
         assert!(init(&ports, false).is_ok());
+    }
+
+    #[test]
+    fn plan_admin_listeners_none_when_both_off() {
+        let ports = PortsConfig {
+            wire: vec![5432],
+            metrics: None,
+            health: None,
+        };
+        assert_eq!(
+            plan_admin_listeners(&ports),
+            Vec::<(u16, bool, bool)>::new()
+        );
+    }
+
+    #[test]
+    fn plan_admin_listeners_metrics_only() {
+        let ports = PortsConfig {
+            wire: vec![5432],
+            metrics: Some(9464),
+            health: None,
+        };
+        assert_eq!(plan_admin_listeners(&ports), vec![(9464, true, false)]);
+    }
+
+    #[test]
+    fn plan_admin_listeners_health_only() {
+        let ports = PortsConfig {
+            wire: vec![5432],
+            metrics: None,
+            health: Some(9465),
+        };
+        assert_eq!(plan_admin_listeners(&ports), vec![(9465, false, true)]);
+    }
+
+    #[test]
+    fn plan_admin_listeners_merges_same_port() {
+        let ports = PortsConfig {
+            wire: vec![5432],
+            metrics: Some(9464),
+            health: Some(9464),
+        };
+        // One listener serving both.
+        assert_eq!(plan_admin_listeners(&ports), vec![(9464, true, true)]);
+    }
+
+    #[test]
+    fn plan_admin_listeners_splits_different_ports() {
+        let ports = PortsConfig {
+            wire: vec![5432],
+            metrics: Some(9464),
+            health: Some(9465),
+        };
+        assert_eq!(
+            plan_admin_listeners(&ports),
+            vec![(9464, true, false), (9465, false, true)]
+        );
     }
 
     #[test]

@@ -12,13 +12,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 pub enum RegistryMsg {
     Create {
         name: String,
         partition_count: u32,
         overrides: TopicConfigOverrides,
-        reply: oneshot::Sender<Result<(), RegistryError>>,
+        reply: oneshot::Sender<Result<String, RegistryError>>,
     },
     Describe {
         name: String,
@@ -27,12 +28,13 @@ pub enum RegistryMsg {
     List {
         reply: oneshot::Sender<Vec<String>>,
     },
-    /// Ensure a topic exists (auto-create semantics). Returns `Ok(())` if this
-    /// call created it; `Err(AlreadyExists)` if it already existed.
+    /// Ensure a topic exists (auto-create semantics). Returns `Ok(uuid)` with
+    /// the assigned UUID if this call created it; `Err(AlreadyExists)` if it
+    /// already existed.
     EnsureExists {
         name: String,
         partition_count: u32,
-        reply: oneshot::Sender<Result<(), RegistryError>>,
+        reply: oneshot::Sender<Result<String, RegistryError>>,
     },
 }
 
@@ -107,7 +109,7 @@ impl TopicRegistry {
                     partition_count,
                     reply,
                 } => {
-                    let r: Result<(), RegistryError> = if self.topics.contains_key(&name) {
+                    let r: Result<String, RegistryError> = if self.topics.contains_key(&name) {
                         Err(RegistryError::AlreadyExists)
                     } else {
                         self.create(&name, partition_count, TopicConfigOverrides::default())
@@ -130,14 +132,14 @@ impl TopicRegistry {
         name: &str,
         partition_count: u32,
         overrides: TopicConfigOverrides,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<String, RegistryError> {
         if self.topics.contains_key(name) {
             return Err(RegistryError::AlreadyExists);
         }
+        let uuid = Uuid::now_v7().hyphenated().to_string();
         let entry: TopicEntry = TopicEntry {
             name: name.to_string(),
-            // TODO(task 5): assign a real UUIDv7 here (topic-create identity).
-            uuid: String::new(),
+            uuid,
             partition_count,
             created_at_ns: now_ns(),
             config: overrides,
@@ -167,8 +169,9 @@ impl TopicRegistry {
                 .await
                 .map_err(|e| RegistryError::Io(e.to_string()))?;
         }
+        let uuid: String = entry.uuid.clone();
         self.topics.insert(name.to_string(), entry);
-        Ok(())
+        Ok(uuid)
     }
 }
 
@@ -247,7 +250,11 @@ mod tests {
         })
         .await
         .unwrap();
-        rr.await.unwrap().unwrap();
+        let uuid = rr.await.unwrap().unwrap();
+        assert_eq!(
+            Uuid::parse_str(&uuid).unwrap().get_version(),
+            Some(uuid::Version::SortRand)
+        );
 
         // topics.json persisted
         assert!(registry_path(&dd).exists());
@@ -255,9 +262,10 @@ mod tests {
         assert!(Path::new(&dd).join("wal/orders/0").exists());
         assert!(Path::new(&dd).join("wal/orders/1").exists());
         // empty manifests exist
-        let raw = crate::object_store::get(&store(dir.path()), &manifest_key("", "orders", "", 1))
-            .await
-            .unwrap();
+        let raw =
+            crate::object_store::get(&store(dir.path()), &manifest_key("", "orders", &uuid, 1))
+                .await
+                .unwrap();
         let m: Manifest = serde_json::from_slice(&raw).unwrap();
         assert_eq!(m.segments.len(), 0);
 
@@ -341,5 +349,35 @@ mod tests {
             TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
                 .unwrap();
         assert!(reg2.resolved("t").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_topic_assigns_uniquely_and_persists_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let registry =
+            TopicRegistry::load(dd.clone(), DiskType::Nvme, store(dir.path()), "".into(), rx)
+                .unwrap();
+        tokio::spawn(registry.run());
+
+        let (r1_tx, r1_rx) = oneshot::channel();
+        tx.send(RegistryMsg::Create {
+            name: "orders".into(),
+            partition_count: 1,
+            overrides: TopicConfigOverrides::default(),
+            reply: r1_tx,
+        })
+        .await
+        .unwrap();
+        r1_rx.await.unwrap().unwrap();
+
+        // Read topics.json off disk and verify uuid is present + parseable.
+        let raw = std::fs::read_to_string(Path::new(&dd).join("topics.json")).unwrap();
+        let parsed: TopicRegistryFile = serde_json::from_str(&raw).unwrap();
+        let entry = &parsed.topics[0];
+        assert_eq!(entry.name, "orders");
+        let parsed_uuid = Uuid::parse_str(&entry.uuid).expect("valid UUID");
+        assert_eq!(parsed_uuid.get_version(), Some(uuid::Version::SortRand)); // v7
     }
 }

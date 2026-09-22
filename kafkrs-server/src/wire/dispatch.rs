@@ -128,7 +128,7 @@ pub async fn handle_produce(
 
     // Auto-create the topic if configured.
     if state.auto_create {
-        let (r, rr) = oneshot::channel::<Result<(), RegistryError>>();
+        let (r, rr) = oneshot::channel::<Result<String, RegistryError>>();
         if state
             .registry
             .send(RegistryMsg::EnsureExists {
@@ -157,16 +157,13 @@ pub async fn handle_produce(
             };
         }
         match rr.await {
-            Ok(Ok(())) => {
+            Ok(Ok(uuid)) => {
                 // Newly created: spawn partition workers so they are present in
                 // state.partitions before the produce handle-lookup below.
                 let cfg = ResolvedTopicConfig::resolve(
                     &TopicConfigOverridesModel::default(),
                     state.disk_type.clone(),
                 );
-                // TODO(task 5): pass the UUID assigned by the registry's
-                // EnsureExists response instead of this placeholder.
-                let uuid = "TODO-task-5".to_string();
                 for p in 0..state.default_partition_count {
                     spawn_partition(
                         &state.data_dir,
@@ -552,7 +549,7 @@ pub async fn handle_create_topic(
     let overrides = wire_overrides_to_model(req.overrides.unwrap_or_default());
     let resolved_cfg = ResolvedTopicConfig::resolve(&overrides, state.disk_type.clone());
 
-    let (tx, rx) = oneshot::channel::<Result<(), RegistryError>>();
+    let (tx, rx) = oneshot::channel::<Result<String, RegistryError>>();
     if state
         .registry
         .send(RegistryMsg::Create {
@@ -570,11 +567,8 @@ pub async fn handle_create_topic(
         };
     }
     match rx.await {
-        Ok(Ok(())) => {
+        Ok(Ok(uuid)) => {
             // Spawn partition workers so subsequent Produce/Fetch RPCs find them.
-            // TODO(task 5): pass the UUID assigned by the registry's Create
-            // response instead of this placeholder.
-            let uuid = "TODO-task-5".to_string();
             for p in 0..partition_count {
                 spawn_partition(
                     &state.data_dir,

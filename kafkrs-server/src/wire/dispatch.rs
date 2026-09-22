@@ -87,6 +87,7 @@ pub fn handle_connected(correlation_id: u64) -> Frame {
             body: Some(Body::Connected(ConnectedResponse {
                 protocol_version: PROTOCOL_VERSION,
                 broker_id: BROKER_ID.to_string(),
+                cluster_id: String::new(),
             })),
         },
         payload: Bytes::new(),

@@ -58,10 +58,16 @@ fn resolve_broker_id(cfg_id: &Option<String>, data_dir: &Path) -> Result<String,
     if path.exists() {
         return std::fs::read_to_string(&path)
             .map(|s| s.trim().to_string())
-            .map_err(|e| IdentityError::IoError(e.to_string()));
+            .map_err(|e| IdentityError::IoError(format!("read {}: {e}", path.display())));
     }
     let id = generate_broker_id();
-    std::fs::write(&path, &id).map_err(|e| IdentityError::IoError(e.to_string()))?;
+    // Ensure data_dir exists — fresh install / container start where the operator
+    // hasn't pre-created the directory needs auto-creation. std::fs::write does
+    // NOT auto-create parents.
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| IdentityError::IoError(format!("create data_dir {}: {e}", data_dir.display())))?;
+    std::fs::write(&path, &id)
+        .map_err(|e| IdentityError::IoError(format!("write {}: {e}", path.display())))?;
     Ok(id)
 }
 
@@ -158,6 +164,22 @@ mod tests {
         // Disk file untouched.
         let file_after = std::fs::read(dir.path().join("broker_id")).unwrap();
         assert_eq!(file_before, file_after);
+    }
+
+    #[test]
+    fn resolve_creates_data_dir_when_missing() {
+        // Point at a subdir that doesn't exist yet — simulates fresh
+        // install / container start where the operator hasn't pre-created
+        // ./data. `std::fs::write` doesn't auto-create parents, so
+        // `resolve_identity` must do so itself.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("nonexistent_subdir");
+        assert!(!missing.exists(), "test setup: subdir should not exist");
+        let cfg = cfg_with(Some("prod-east"), None);
+        let ident = resolve_identity(&cfg, "127.0.0.1", 5432, &missing).unwrap();
+        assert!(is_valid_broker_id(&ident.broker_id));
+        assert!(missing.exists(), "data_dir should have been created");
+        assert!(missing.join("broker_id").exists(), "broker_id file should exist");
     }
 
     #[test]

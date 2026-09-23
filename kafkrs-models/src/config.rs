@@ -36,6 +36,14 @@ pub struct BrokerConfig {
     pub retention_sweep_interval_ms: Option<u64>,
     #[serde(default)]
     pub metrics_high_cardinality: bool,
+    /// Cluster identifier. **Required** — broker refuses to start if unset.
+    /// Load-bearing safety machinery: clients cache this to detect misconfiguration.
+    #[serde(default)]
+    pub cluster_id: Option<String>,
+    /// Broker identifier. Optional. If unset, resolved from `data_dir/broker_id`
+    /// on restart, or auto-generated (`brk-<8hex>`) and persisted on first boot.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 impl Default for BrokerConfig {
@@ -46,6 +54,8 @@ impl Default for BrokerConfig {
             default_partition_count: default_partition_count(),
             retention_sweep_interval_ms: None,
             metrics_high_cardinality: false,
+            cluster_id: None,
+            id: None,
         }
     }
 }
@@ -326,5 +336,75 @@ bucket = "b"
             err.contains("ports"),
             "error should mention `ports` field, got: {err}"
         );
+    }
+
+    #[test]
+    fn broker_cluster_id_and_id_parse_when_present() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[broker]
+cluster_id = "prod-east"
+id = "broker-1"
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.broker.cluster_id.as_deref(), Some("prod-east"));
+        assert_eq!(cfg.broker.id.as_deref(), Some("broker-1"));
+    }
+
+    #[test]
+    fn broker_cluster_id_only_parses_id_defaults_none() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[broker]
+cluster_id = "staging-us-west"
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.broker.cluster_id.as_deref(), Some("staging-us-west"));
+        assert_eq!(cfg.broker.id, None);
+    }
+
+    #[test]
+    fn broker_defaults_leave_cluster_id_and_id_none() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.broker.cluster_id, None);
+        assert_eq!(cfg.broker.id, None);
     }
 }

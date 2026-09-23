@@ -12,6 +12,8 @@ wire = [5432]
 disk_type = "nvme"
 auto_create_topics = false
 default_partition_count = 1
+cluster_id = "kafkrs-local"
+# id = "broker-1"          # optional; auto-generated as brk-<8hex> and persisted to data/broker_id if unset
 
 [object_store]
 backend = "filesystem"

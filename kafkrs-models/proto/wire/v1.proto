@@ -6,9 +6,11 @@ message Command {
   // Reserved for v1.5+ streaming-consumer RPCs:
   //   Subscribe / Subscribed / Flow / Message / Ack / Unsubscribe
   reserved 40 to 49;
-  // Reserved for v1.5+ admin RPCs:
-  //   AlterConfig / BrokerInfo
-  reserved 54 to 59;
+  // Admin overflow — filled as new admin RPCs land after Metadata/AlterConfig.
+  reserved 56 to 59;
+  // Future RPC categories (multi-broker admin, consumer-group admin, etc.).
+  // Documented as reserved to prevent accidental collision when new categories arrive.
+  reserved 60 to 79;
 
   uint64 correlation_id = 1;
 
@@ -25,17 +27,19 @@ message Command {
     FetchRequest           fetch                 = 22;
     FetchResponse          fetch_resp            = 23;
 
-    // Control plane (30-39, 50-53)
-    CreateTopicRequest     create_topic          = 30;
-    CreateTopicResponse    create_topic_resp     = 31;
-    DescribeTopicRequest   describe_topic        = 32;
-    DescribeTopicResponse  describe_topic_resp   = 33;
-    ListTopicsRequest      list_topics           = 34;
-    ListTopicsResponse     list_topics_resp      = 35;
-    DeleteTopicRequest     delete_topic          = 50;
-    DeleteTopicResponse    delete_topic_resp     = 51;
+    // Control plane (30-39, 50-55)
+    CreateTopicRequest        create_topic            = 30;
+    CreateTopicResponse       create_topic_resp       = 31;
+    DescribeTopicRequest      describe_topic          = 32;
+    DescribeTopicResponse     describe_topic_resp     = 33;
+    ListTopicsRequest         list_topics             = 34;
+    ListTopicsResponse        list_topics_resp        = 35;
+    DeleteTopicRequest        delete_topic            = 50;
+    DeleteTopicResponse       delete_topic_resp       = 51;
     AlterTopicConfigRequest   alter_topic_config      = 52;
     AlterTopicConfigResponse  alter_topic_config_resp = 53;
+    MetadataRequest           metadata                = 54;
+    MetadataResponse          metadata_resp           = 55;
 
     // Errors
     ErrorResponse          error                 = 99;
@@ -53,6 +57,7 @@ message ConnectRequest {
 message ConnectedResponse {
   uint32 protocol_version = 1;
   string broker_id        = 2;
+  string cluster_id       = 3;
 }
 
 message PingRequest  {}
@@ -148,6 +153,36 @@ message AlterTopicConfigRequest {
 }
 message AlterTopicConfigResponse {
   TopicConfigOverrides overrides = 1;
+}
+
+message MetadataRequest {
+  // Empty list = return all topics.
+  repeated string topics = 1;
+}
+
+message MetadataResponse {
+  string cluster_id                = 1;
+  repeated BrokerInfo brokers      = 2;
+  repeated TopicMetadata topics    = 3;
+}
+
+message BrokerInfo {
+  string broker_id = 1;
+  string host      = 2;
+  uint32 port      = 3;
+}
+
+message TopicMetadata {
+  string topic                            = 1;
+  // 0 = OK; otherwise the ErrorCode enum value.
+  uint32 error_code                       = 2;
+  string topic_uuid                       = 3;
+  repeated PartitionMetadata partitions   = 4;
+}
+
+message PartitionMetadata {
+  uint32 partition        = 1;
+  string leader_broker_id = 2;
 }
 
 // ---- Errors ----

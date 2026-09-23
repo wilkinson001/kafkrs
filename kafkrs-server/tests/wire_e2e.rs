@@ -10,6 +10,7 @@ use kafkrs_models::topic::{
 use kafkrs_models::wire::v1::{
     command::Body, Command, ConnectRequest, FetchRequest, InRecordMeta, ProduceRequest,
 };
+use kafkrs_server::broker_identity::BrokerIdentity;
 use kafkrs_server::object_store::{build_store, manifest_key, put};
 use kafkrs_server::partition_writer::{PartitionWriter, PwMsg};
 use kafkrs_server::topic_registry::TopicRegistry;
@@ -27,6 +28,15 @@ static METRICS_INIT: std::sync::Once = std::sync::Once::new();
 static METRICS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
 const TOPIC_UUID: &str = "01936a80-0000-7000-8000-000000000000";
+
+fn test_identity() -> BrokerIdentity {
+    BrokerIdentity {
+        broker_id: Arc::from("brk-testtest".to_string()),
+        cluster_id: Arc::from("test-cluster".to_string()),
+        advertised_host: Arc::from("127.0.0.1".to_string()),
+        advertised_port: 5432,
+    }
+}
 
 /// Installs the global Prometheus recorder exactly once for the whole test
 /// binary (the `metrics` crate's global recorder can only be installed
@@ -144,6 +154,7 @@ async fn setup_broker_no_topics(dd: &str) -> u16 {
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -183,6 +194,7 @@ async fn setup_broker_auto_create(dd: &str) -> u16 {
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -303,6 +315,7 @@ async fn setup_broker(dd: &str) -> (u16, Arc<RwLock<HashMap<(String, u32), Parti
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -411,6 +424,7 @@ async fn setup_broker_with_retention(
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     tokio::spawn(
@@ -787,6 +801,7 @@ async fn setup_broker_with_max_fetch_wait(
         data_dir: dd.into(),
         disk_type: DiskType::Nvme,
         spawn_locks: Arc::new(StdMutex::new(HashMap::new())),
+        identity: test_identity(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2088,5 +2103,216 @@ async fn alter_topic_config_updates_uploader_retention() {
             );
         }
         other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_response_carries_broker_id_and_cluster_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "e2e".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::Connected(c)) => {
+            assert_eq!(c.broker_id, "brk-testtest");
+            assert_eq!(c.cluster_id, "test-cluster");
+        }
+        other => panic!("expected Connected, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_empty_filter_returns_all_topics_and_self_broker() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Connect.
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "e2e".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Metadata request with empty filter.
+    let md = Command {
+        correlation_id: 2,
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec![],
+        })),
+    };
+    sock.write_all(&encode(&md, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::MetadataResp(m)) => {
+            assert_eq!(m.cluster_id, "test-cluster");
+            assert_eq!(m.brokers.len(), 1);
+            assert_eq!(m.brokers[0].broker_id, "brk-testtest");
+            assert_eq!(m.brokers[0].host, "127.0.0.1");
+            assert_eq!(m.brokers[0].port, 5432);
+            // setup_broker seeds topic "t" — expect at least that.
+            let names: Vec<&str> = m.topics.iter().map(|t| t.topic.as_str()).collect();
+            assert!(
+                names.contains(&"t"),
+                "expected topic 't' in metadata, got {names:?}"
+            );
+            let t = m.topics.iter().find(|t| t.topic == "t").unwrap();
+            assert_eq!(t.error_code, 0);
+            assert!(!t.topic_uuid.is_empty());
+            assert!(!t.partitions.is_empty());
+            for p in &t.partitions {
+                assert_eq!(p.leader_broker_id, "brk-testtest");
+            }
+        }
+        other => panic!("expected MetadataResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_filter_returns_only_requested_topics() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "e2e".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let md = Command {
+        correlation_id: 2,
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["t".into()],
+        })),
+    };
+    sock.write_all(&encode(&md, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::MetadataResp(m)) => {
+            assert_eq!(m.topics.len(), 1);
+            assert_eq!(m.topics[0].topic, "t");
+            assert_eq!(m.topics[0].error_code, 0);
+        }
+        other => panic!("expected MetadataResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_filter_with_unknown_topic_returns_per_topic_error() {
+    use kafkrs_models::wire::v1::ErrorCode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "e2e".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let md = Command {
+        correlation_id: 2,
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["t".into(), "no-such-topic".into()],
+        })),
+    };
+    sock.write_all(&encode(&md, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::MetadataResp(m)) => {
+            assert_eq!(m.topics.len(), 2);
+            let ok = m.topics.iter().find(|t| t.topic == "t").expect("t missing");
+            assert_eq!(ok.error_code, 0);
+            assert!(!ok.topic_uuid.is_empty());
+            assert!(!ok.partitions.is_empty());
+
+            let bad = m
+                .topics
+                .iter()
+                .find(|t| t.topic == "no-such-topic")
+                .expect("no-such-topic missing");
+            assert_eq!(bad.error_code, ErrorCode::ErrUnknownTopic as u32);
+            assert!(bad.topic_uuid.is_empty());
+            assert!(bad.partitions.is_empty());
+        }
+        other => panic!("expected MetadataResp, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_partition_metadata_lists_self_as_leader_for_every_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _partitions) = setup_broker(dir.path().to_str().unwrap()).await;
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let connect = Command {
+        correlation_id: 1,
+        body: Some(Body::Connect(ConnectRequest {
+            protocol_version: 1,
+            client_id: "e2e".into(),
+            auth_data: vec![],
+        })),
+    };
+    sock.write_all(&encode(&connect, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    // Create a topic with 3 partitions.
+    let create = Command {
+        correlation_id: 2,
+        body: Some(Body::CreateTopic(
+            kafkrs_models::wire::v1::CreateTopicRequest {
+                topic: "multi".into(),
+                partition_count: 3,
+                overrides: None,
+            },
+        )),
+    };
+    sock.write_all(&encode(&create, b"")).await.unwrap();
+    let _ = read_frame(&mut sock).await;
+
+    let md = Command {
+        correlation_id: 3,
+        body: Some(Body::Metadata(kafkrs_models::wire::v1::MetadataRequest {
+            topics: vec!["multi".into()],
+        })),
+    };
+    sock.write_all(&encode(&md, b"")).await.unwrap();
+    let (resp, _) = read_frame(&mut sock).await;
+    match resp.body {
+        Some(Body::MetadataResp(m)) => {
+            let t = &m.topics[0];
+            assert_eq!(t.partitions.len(), 3);
+            let mut pids: Vec<u32> = t.partitions.iter().map(|p| p.partition).collect();
+            pids.sort();
+            assert_eq!(pids, vec![0, 1, 2]);
+            for p in &t.partitions {
+                assert_eq!(p.leader_broker_id, "brk-testtest");
+            }
+        }
+        other => panic!("expected MetadataResp, got {other:?}"),
     }
 }

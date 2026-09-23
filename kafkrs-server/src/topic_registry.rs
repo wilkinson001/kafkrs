@@ -59,6 +59,12 @@ pub enum RegistryMsg {
         patch: TopicConfigOverrides,
         reply: oneshot::Sender<Result<TopicConfigOverrides, RegistryError>>,
     },
+    /// Return a snapshot of every `TopicEntry` currently in the registry.
+    /// Used by the wire layer's `handle_metadata` to build the Metadata
+    /// response in one round trip instead of N Describes.
+    Snapshot {
+        reply: oneshot::Sender<Vec<TopicEntry>>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -165,6 +171,9 @@ impl TopicRegistry {
                 }
                 RegistryMsg::Alter { name, patch, reply } => {
                     let _ = reply.send(self.alter(&name, patch).await);
+                }
+                RegistryMsg::Snapshot { reply } => {
+                    let _ = reply.send(self.topics.values().cloned().collect());
                 }
             }
         }
@@ -732,5 +741,58 @@ mod tests {
         let (_tx, rx) = mpsc::channel(1);
         // This should panic with a message naming the offending field.
         let _ = TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx);
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_all_topics_in_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
+        tokio::spawn(reg.run());
+
+        // Create two topics.
+        for (name, pc) in [("orders", 2u32), ("events", 3u32)] {
+            let (r, rr) = oneshot::channel();
+            tx.send(RegistryMsg::Create {
+                name: name.into(),
+                partition_count: pc,
+                overrides: TopicConfigOverrides::default(),
+                reply: r,
+            })
+            .await
+            .unwrap();
+            rr.await.unwrap().unwrap();
+        }
+
+        // Snapshot.
+        let (r, rr) = oneshot::channel();
+        tx.send(RegistryMsg::Snapshot { reply: r }).await.unwrap();
+        let snapshot = rr.await.unwrap();
+        assert_eq!(snapshot.len(), 2);
+        let mut names: Vec<String> = snapshot.iter().map(|t| t.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["events".to_string(), "orders".to_string()]);
+        // Each entry carries a valid uuid + partition_count.
+        for t in &snapshot {
+            assert!(!t.uuid.is_empty());
+            assert!(t.partition_count >= 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_empty_when_registry_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path().to_str().unwrap().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        let reg =
+            TopicRegistry::load(dd, DiskType::Nvme, store(dir.path()), "".into(), rx).unwrap();
+        tokio::spawn(reg.run());
+
+        let (r, rr) = oneshot::channel();
+        tx.send(RegistryMsg::Snapshot { reply: r }).await.unwrap();
+        let snapshot = rr.await.unwrap();
+        assert!(snapshot.is_empty());
     }
 }

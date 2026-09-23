@@ -4,6 +4,17 @@ All notable changes to this crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The three crates in this workspace (`kafkrs-models`, `kafkrs-server`, `kafkrs-python`) are versioned in lockstep.
 
+## [0.7.0] — 2026-09-22
+
+- Added `Metadata` admin RPC returning per-partition leader info + broker addresses. Empty topic filter returns all topics; unknown topics in a filter return per-topic `error_code = ERR_UNKNOWN_TOPIC` with empty partitions and empty `topic_uuid`.
+- Added broker identity resolution at boot: `broker.id` in config wins; otherwise reads `data_dir/broker_id`; otherwise auto-generates `brk-<8hex>` and persists on first boot.
+- `ConnectedResponse` now returns real `broker_id` and `cluster_id` sourced from resolved identity (previously a build-time constant).
+- Added `RegistryMsg::Snapshot` for one-shot topic list queries.
+
+### Breaking changes
+
+- `broker.cluster_id` is now **required** in `config.toml`. The broker refuses to start with a clear error if unset. Rationale: `cluster_id` is a load-bearing safety mechanism (clients cache it to detect misconfiguration); silently auto-generating it defeats the purpose.
+
 ## [0.6.2] — 2026-09-22
 
 - Added `AlterTopicConfig` admin RPC. Partial-patch semantics: fields set on the request overwrite the stored config; unset fields are unchanged. Merged config is persisted to `topics.json` before running `PartitionWriter` and `Uploader` actors are pushed `UpdateConfig` messages, so a crash between persist and push self-heals on restart.

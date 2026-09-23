@@ -221,6 +221,31 @@ class Client:
             raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
         return list(resp.list_topics_resp.topics)
 
+    async def get_metadata(
+        self,
+        topics: Optional[List[str]] = None,
+    ) -> v1_pb2.MetadataResponse:
+        """Return broker + topic metadata.
+
+        Empty `topics` (or `None`) returns metadata for all topics. Otherwise
+        returns metadata for the requested topics; unknown topics come back
+        with a per-topic `error_code = ERR_UNKNOWN_TOPIC`.
+        """
+        cmd = v1_pb2.Command()
+        cmd.correlation_id = self._next_id()
+        if topics:
+            cmd.metadata.topics.extend(topics)
+        else:
+            # Ensure the metadata oneof arm is set even when the filter list
+            # is empty; without this, WhichOneof("body") is None on the wire.
+            cmd.metadata.SetInParent()
+        resp, _ = await self._roundtrip(cmd, b"")
+        if resp.WhichOneof("body") == "error":
+            raise WireError(resp.error.code, resp.error.message)
+        if resp.WhichOneof("body") != "metadata_resp":
+            raise WireError(0, f"unexpected response: {resp.WhichOneof('body')}")
+        return resp.metadata_resp
+
     # ---- Internals ----
 
     def _next_id(self) -> int:

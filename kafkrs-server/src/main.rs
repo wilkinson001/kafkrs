@@ -8,6 +8,7 @@ use tokio::signal;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
+use kafkrs_server::broker_identity::resolve_identity;
 use kafkrs_server::config;
 use kafkrs_server::object_store::build_store;
 use kafkrs_server::retention_sweeper::RetentionSweeper;
@@ -29,6 +30,21 @@ async fn main() {
         .config_path
         .unwrap_or_else(|| "./config.toml".to_string());
     let cfg: kafkrs_models::config::Config = config::load_config(config_path);
+
+    // Broker identity — fail-fast if cluster_id missing. Panics with a clear
+    // error naming the field.
+    let wire_port_for_advertise = *cfg
+        .ports
+        .wire
+        .first()
+        .expect("at least one wire port must be configured (ports.wire = [...])");
+    let identity = resolve_identity(
+        &cfg.broker,
+        &cfg.address,
+        wire_port_for_advertise,
+        std::path::Path::new(&cfg.data_dir),
+    )
+    .unwrap_or_else(|e| panic!("broker identity resolution failed: {e}"));
 
     kafkrs_server::metrics::init(&cfg.ports, cfg.broker.metrics_high_cardinality)
         .expect("metrics init");
@@ -88,6 +104,7 @@ async fn main() {
         data_dir: cfg.data_dir.clone(),
         disk_type: cfg.broker.disk_type.clone(),
         spawn_locks: spawn_locks.clone(),
+        identity: identity.clone(),
     };
 
     let sweep_interval =

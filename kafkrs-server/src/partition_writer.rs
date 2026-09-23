@@ -13,6 +13,7 @@ use tokio::time::{Duration, Instant};
 
 /// An incoming record before offset assignment (offset/timestamp may be unset;
 /// timestamp 0 means "broker-stamp it").
+#[derive(Debug)]
 pub struct IncomingRecord {
     pub schema_id: u32,
     pub key: Vec<u8>,

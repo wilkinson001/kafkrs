@@ -14,7 +14,9 @@ use crate::topic_registry::{RegistryError, RegistryMsg};
 use crate::wire::errors::make_error;
 use crate::wire::frame::Frame;
 use bytes::Bytes;
-use kafkrs_models::topic::{ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel};
+use kafkrs_models::topic::{
+    ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel,
+};
 use kafkrs_models::wire::v1::{command::Body, Command, ErrorCode, ProduceResponse};
 use tokio::sync::oneshot;
 

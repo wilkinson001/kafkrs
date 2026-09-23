@@ -53,6 +53,10 @@ pub async fn handle_produce(
     }
 }
 
+// See `validate_record_sizes` for the `result_large_err` rationale: `Frame`
+// is intentionally large, and boxing it here would only push the cost onto
+// every `?` in this module.
+#[allow(clippy::result_large_err)]
 async fn produce_inner(
     correlation_id: u64,
     state: &SharedState,
@@ -109,6 +113,9 @@ fn produce_error(
 /// the topic first if `state.auto_create` is set. On any failure returns
 /// a fully-built error `Frame` (via `produce_error`) so the caller can
 /// short-circuit with `?`.
+///
+/// `#[allow(clippy::result_large_err)]`: see `validate_record_sizes`.
+#[allow(clippy::result_large_err)]
 async fn resolve_or_ensure_partition(
     state: &SharedState,
     topic: &str,

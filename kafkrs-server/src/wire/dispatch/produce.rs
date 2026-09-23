@@ -39,7 +39,16 @@ pub async fn handle_produce(
     // error frame (metric already bumped by produce_error). `produce_inner`
     // uses `?` for early return; this outer function collapses both arms
     // back to a single Frame, since the caller doesn't distinguish.
-    match produce_inner(correlation_id, state, &topic, partition, records_meta, payload).await {
+    match produce_inner(
+        correlation_id,
+        state,
+        &topic,
+        partition,
+        records_meta,
+        payload,
+    )
+    .await
+    {
         Ok(frame) | Err(frame) => frame,
     }
 }
@@ -64,8 +73,7 @@ async fn produce_inner(
         ));
     }
 
-    let handle =
-        resolve_or_ensure_partition(state, topic, partition, correlation_id).await?;
+    let handle = resolve_or_ensure_partition(state, topic, partition, correlation_id).await?;
     validate_record_sizes(&records_meta, &handle, topic, partition, correlation_id)?;
     let records = slice_payload(records_meta, payload, topic, partition, correlation_id)?;
     Ok(commit_records(&handle, records, topic, partition, correlation_id, start).await)

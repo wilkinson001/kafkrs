@@ -108,3 +108,46 @@ pub(super) fn model_overrides_to_wire(m: TopicConfigOverridesModel) -> TopicConf
         retention_bytes: m.retention_bytes,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overrides_round_trip_preserves_all_fields() {
+        // Full-populated model → wire → model round trip should be
+        // byte-identical: proves the field mapping (including the
+        // usize↔u64/u32 casts) is order-preserving and lossless for the
+        // realistic value range.
+        let original = TopicConfigOverridesModel {
+            segment_size_bytes: Some(1024),
+            segment_seal_time_ms: Some(1000),
+            max_key_size_bytes: Some(512),
+            max_value_size_bytes: Some(65_536),
+            group_commit_time_ms: Some(10),
+            group_commit_size_bytes: Some(2048),
+            group_commit_record_count: Some(64),
+            max_fetch_wait_ms: Some(100),
+            retention_ms: Some(60_000),
+            retention_bytes: Some(1_000_000_000),
+        };
+        let w = model_overrides_to_wire(original.clone());
+        let back = wire_overrides_to_model(w);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn overrides_default_round_trip_stays_all_none() {
+        // Empty overrides must survive the round trip with every field
+        // still `None` — the wire→model path must NOT accidentally
+        // populate defaults from the resolve step.
+        let original = TopicConfigOverridesModel::default();
+        let w = model_overrides_to_wire(original.clone());
+        let back = wire_overrides_to_model(w);
+        assert_eq!(back, original);
+        assert!(back.segment_size_bytes.is_none());
+        assert!(back.retention_ms.is_none());
+        assert!(back.group_commit_size_bytes.is_none());
+        assert!(back.group_commit_record_count.is_none());
+    }
+}

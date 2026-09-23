@@ -378,3 +378,157 @@ async fn commit_records(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kafkrs_models::config::DiskType;
+    use kafkrs_models::topic::TopicConfigOverrides as ModelOverrides;
+    use tokio::sync::broadcast;
+
+    fn test_handle(cfg: ResolvedTopicConfig) -> PartitionHandle {
+        let (pw_tx, _pw_rx) = tokio::sync::mpsc::channel(1);
+        let (uploader_tx, _u_rx) = tokio::sync::mpsc::channel(1);
+        let (tail, _t_rx) = broadcast::channel(1);
+        PartitionHandle {
+            pw_tx,
+            tail,
+            cfg,
+            uploader_tx,
+            uuid: "test-uuid".into(),
+        }
+    }
+
+    fn cfg_with_limits(max_key: u32, max_value: u32) -> ResolvedTopicConfig {
+        ResolvedTopicConfig::resolve(
+            &ModelOverrides {
+                max_key_size_bytes: Some(max_key),
+                max_value_size_bytes: Some(max_value),
+                ..Default::default()
+            },
+            DiskType::Nvme,
+        )
+    }
+
+    fn err_code_of(frame: &Frame) -> Option<i32> {
+        match &frame.command.body {
+            Some(Body::Error(e)) => Some(e.code),
+            _ => None,
+        }
+    }
+
+    // ---- validate_record_sizes ----
+
+    #[test]
+    fn validate_record_sizes_accepts_within_limits() {
+        let handle = test_handle(cfg_with_limits(100, 1000));
+        let metas = vec![InRecordMeta {
+            key_len: 50,
+            value_len: 500,
+            schema_id: 0,
+            timestamp_ns: 0,
+        }];
+        assert!(validate_record_sizes(&metas, &handle, "t", 0, 1).is_ok());
+    }
+
+    #[test]
+    fn validate_record_sizes_rejects_oversized_key() {
+        let handle = test_handle(cfg_with_limits(100, 1000));
+        let metas = vec![InRecordMeta {
+            key_len: 101, // one byte over
+            value_len: 500,
+            schema_id: 0,
+            timestamp_ns: 0,
+        }];
+        let err = validate_record_sizes(&metas, &handle, "t", 0, 1).unwrap_err();
+        assert_eq!(err_code_of(&err), Some(ErrorCode::ErrKeyTooLarge as i32));
+    }
+
+    #[test]
+    fn validate_record_sizes_rejects_oversized_value() {
+        let handle = test_handle(cfg_with_limits(100, 1000));
+        let metas = vec![InRecordMeta {
+            key_len: 50,
+            value_len: 1001, // one byte over
+            schema_id: 0,
+            timestamp_ns: 0,
+        }];
+        let err = validate_record_sizes(&metas, &handle, "t", 0, 1).unwrap_err();
+        assert_eq!(err_code_of(&err), Some(ErrorCode::ErrRecordTooLarge as i32));
+    }
+
+    // ---- slice_payload ----
+
+    #[test]
+    fn slice_payload_chunks_two_records_correctly() {
+        // Record 1: key_len=3, value_len=5 → "key" + "value" (8 bytes)
+        // Record 2: key_len=2, value_len=4 → "ke"  + "valu"  (6 bytes)
+        // Total payload = 14 bytes = "keyvaluekevalu"
+        let metas = vec![
+            InRecordMeta {
+                key_len: 3,
+                value_len: 5,
+                schema_id: 7,
+                timestamp_ns: 100,
+            },
+            InRecordMeta {
+                key_len: 2,
+                value_len: 4,
+                schema_id: 8,
+                timestamp_ns: 200,
+            },
+        ];
+        let payload = Bytes::from_static(b"keyvaluekevalu");
+        let records = slice_payload(metas, payload, "t", 0, 1).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].key, b"key");
+        assert_eq!(records[0].value, b"value");
+        assert_eq!(records[0].schema_id, 7);
+        assert_eq!(records[0].timestamp_ns, 100);
+        assert_eq!(records[1].key, b"ke");
+        assert_eq!(records[1].value, b"valu");
+        assert_eq!(records[1].schema_id, 8);
+        assert_eq!(records[1].timestamp_ns, 200);
+    }
+
+    #[test]
+    fn slice_payload_handles_single_record() {
+        let metas = vec![InRecordMeta {
+            key_len: 3,
+            value_len: 5,
+            schema_id: 42,
+            timestamp_ns: 999,
+        }];
+        let records = slice_payload(metas, Bytes::from_static(b"keyvalue"), "t", 0, 1).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key, b"key");
+        assert_eq!(records[0].value, b"value");
+    }
+
+    #[test]
+    fn slice_payload_rejects_payload_shorter_than_declared() {
+        let metas = vec![InRecordMeta {
+            key_len: 3,
+            value_len: 5,
+            schema_id: 0,
+            timestamp_ns: 0,
+        }];
+        // Declared 8 bytes total, only 5 provided.
+        let err = slice_payload(metas, Bytes::from_static(b"short"), "t", 0, 1).unwrap_err();
+        assert_eq!(err_code_of(&err), Some(ErrorCode::ErrMalformedFrame as i32));
+    }
+
+    #[test]
+    fn slice_payload_rejects_payload_longer_than_declared() {
+        let metas = vec![InRecordMeta {
+            key_len: 3,
+            value_len: 5,
+            schema_id: 0,
+            timestamp_ns: 0,
+        }];
+        // Declared 8 bytes total, 13 provided.
+        let err = slice_payload(metas, Bytes::from_static(b"keyvalueEXTRA"), "t", 0, 1)
+            .unwrap_err();
+        assert_eq!(err_code_of(&err), Some(ErrorCode::ErrMalformedFrame as i32));
+    }
+}

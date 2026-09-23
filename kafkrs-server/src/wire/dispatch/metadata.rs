@@ -108,3 +108,44 @@ fn topic_meta_from_entry(entry: &TopicEntry, leader_broker_id: &str) -> TopicMet
         partitions,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn topic_entry(name: &str, uuid: &str, partition_count: u32) -> TopicEntry {
+        TopicEntry {
+            name: name.into(),
+            uuid: uuid.into(),
+            partition_count,
+            created_at_ns: 0,
+            config: Default::default(),
+        }
+    }
+
+    #[test]
+    fn topic_meta_from_entry_expands_partitions_and_sets_leader() {
+        let entry = topic_entry("orders", "uuid-abc", 3);
+        let meta = topic_meta_from_entry(&entry, "brk-1");
+        assert_eq!(meta.topic, "orders");
+        assert_eq!(meta.topic_uuid, "uuid-abc");
+        assert_eq!(meta.error_code, 0);
+        assert_eq!(meta.partitions.len(), 3);
+        for (i, p) in meta.partitions.iter().enumerate() {
+            assert_eq!(p.partition, i as u32);
+            assert_eq!(p.leader_broker_id, "brk-1");
+        }
+    }
+
+    #[test]
+    fn topic_meta_from_entry_zero_partitions_produces_empty_list() {
+        // partition_count == 0 is not a state CreateTopic will produce today,
+        // but the helper is a pure function on TopicEntry — this test locks
+        // in that 0 yields an empty partition list without a runtime panic.
+        let entry = topic_entry("empty", "uuid-x", 0);
+        let meta = topic_meta_from_entry(&entry, "brk-1");
+        assert!(meta.partitions.is_empty());
+        assert_eq!(meta.error_code, 0);
+        assert_eq!(meta.topic_uuid, "uuid-x");
+    }
+}

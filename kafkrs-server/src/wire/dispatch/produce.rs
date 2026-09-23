@@ -527,8 +527,8 @@ mod tests {
             timestamp_ns: 0,
         }];
         // Declared 8 bytes total, 13 provided.
-        let err = slice_payload(metas, Bytes::from_static(b"keyvalueEXTRA"), "t", 0, 1)
-            .unwrap_err();
+        let err =
+            slice_payload(metas, Bytes::from_static(b"keyvalueEXTRA"), "t", 0, 1).unwrap_err();
         assert_eq!(err_code_of(&err), Some(ErrorCode::ErrMalformedFrame as i32));
     }
 }

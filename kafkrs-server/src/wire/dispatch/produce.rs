@@ -2,8 +2,15 @@
 //! is true, enforces per-topic key/value size limits, slices the wire
 //! payload into per-record bytes, and awaits the WAL fsync ack before
 //! returning the assigned offsets to the client.
+//!
+//! Structured as five helpers behind a thin orchestrator:
+//! - `produce_error` — one place to emit `PRODUCE_ERRORS` + build an error `Frame`.
+//! - `resolve_or_ensure_partition` — auto-create-if-needed then partition lookup.
+//! - `validate_record_sizes` — per-topic key/value byte limits.
+//! - `slice_payload` — chunk the wire payload into `IncomingRecord`s.
+//! - `commit_records` — hand off to the writer, await ack, emit success metrics.
 
-use super::SharedState;
+use super::{PartitionHandle, SharedState};
 use crate::metrics::{
     partition_label, partition_label_with, LABEL_ERROR_CODE, PRODUCE_BYTES, PRODUCE_ERRORS,
     PRODUCE_LATENCY_MS, PRODUCE_RECORDS,
@@ -17,7 +24,7 @@ use bytes::Bytes;
 use kafkrs_models::topic::{
     ResolvedTopicConfig, TopicConfigOverrides as TopicConfigOverridesModel,
 };
-use kafkrs_models::wire::v1::{command::Body, Command, ErrorCode, ProduceResponse};
+use kafkrs_models::wire::v1::{command::Body, Command, ErrorCode, InRecordMeta, ProduceResponse};
 use tokio::sync::oneshot;
 
 pub async fn handle_produce(
@@ -25,63 +32,100 @@ pub async fn handle_produce(
     state: &SharedState,
     topic: String,
     partition: u32,
-    records_meta: Vec<kafkrs_models::wire::v1::InRecordMeta>,
+    records_meta: Vec<InRecordMeta>,
     payload: Bytes,
 ) -> Frame {
-    let __start = std::time::Instant::now();
+    // Every helper below returns Result<_, Frame> where Err = a fully-built
+    // error frame (metric already bumped by produce_error). `produce_inner`
+    // uses `?` for early return; this outer function collapses both arms
+    // back to a single Frame, since the caller doesn't distinguish.
+    match produce_inner(correlation_id, state, &topic, partition, records_meta, payload).await {
+        Ok(frame) | Err(frame) => frame,
+    }
+}
+
+async fn produce_inner(
+    correlation_id: u64,
+    state: &SharedState,
+    topic: &str,
+    partition: u32,
+    records_meta: Vec<InRecordMeta>,
+    payload: Bytes,
+) -> Result<Frame, Frame> {
+    let start = std::time::Instant::now();
 
     if records_meta.is_empty() {
-        metrics::counter!(
-            PRODUCE_ERRORS,
-            &partition_label_with(
-                &topic,
-                partition,
-                &[(
-                    LABEL_ERROR_CODE,
-                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
-                )],
-            )
-        )
-        .increment(1);
-        return Frame {
-            command: make_error(
-                correlation_id,
-                ErrorCode::ErrMalformedFrame,
-                "produce must contain at least one record",
-            ),
-            payload: Bytes::new(),
-        };
+        return Err(produce_error(
+            topic,
+            partition,
+            correlation_id,
+            ErrorCode::ErrMalformedFrame,
+            "produce must contain at least one record",
+        ));
     }
 
-    // Auto-create the topic if configured.
+    let handle =
+        resolve_or_ensure_partition(state, topic, partition, correlation_id).await?;
+    validate_record_sizes(&records_meta, &handle, topic, partition, correlation_id)?;
+    let records = slice_payload(records_meta, payload, topic, partition, correlation_id)?;
+    Ok(commit_records(&handle, records, topic, partition, correlation_id, start).await)
+}
+
+/// Build an error `Frame` for the Produce path AND bump `PRODUCE_ERRORS`
+/// with the failing `error_code` as a metric label. Every Produce error
+/// path routes through here so the metric-and-frame pairing is a single
+/// call site.
+fn produce_error(
+    topic: &str,
+    partition: u32,
+    correlation_id: u64,
+    code: ErrorCode,
+    message: impl Into<String>,
+) -> Frame {
+    metrics::counter!(
+        PRODUCE_ERRORS,
+        &partition_label_with(
+            topic,
+            partition,
+            &[(LABEL_ERROR_CODE, format!("{}", code as i32))],
+        )
+    )
+    .increment(1);
+    Frame {
+        command: make_error(correlation_id, code, message),
+        payload: Bytes::new(),
+    }
+}
+
+/// Return a live `PartitionHandle` for `(topic, partition)`, auto-creating
+/// the topic first if `state.auto_create` is set. On any failure returns
+/// a fully-built error `Frame` (via `produce_error`) so the caller can
+/// short-circuit with `?`.
+async fn resolve_or_ensure_partition(
+    state: &SharedState,
+    topic: &str,
+    partition: u32,
+    correlation_id: u64,
+) -> Result<PartitionHandle, Frame> {
     if state.auto_create {
         let (r, rr) = oneshot::channel::<Result<String, RegistryError>>();
         if state
             .registry
             .send(RegistryMsg::EnsureExists {
-                name: topic.clone(),
+                name: topic.to_string(),
                 partition_count: state.default_partition_count,
                 reply: r,
             })
             .await
             .is_err()
         {
-            metrics::counter!(
-                PRODUCE_ERRORS,
-                &partition_label_with(
-                    &topic,
-                    partition,
-                    &[(
-                        LABEL_ERROR_CODE,
-                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
-                    )],
-                )
-            )
-            .increment(1);
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
+            return Err(produce_error(
+                topic,
+                partition,
+                correlation_id,
+                ErrorCode::ErrBrokerNotReady,
+                "",
+            ));
         }
         match rr.await {
             Ok(Ok(uuid)) => {
@@ -94,7 +138,7 @@ pub async fn handle_produce(
                 for p in 0..state.default_partition_count {
                     spawn_partition(
                         &state.data_dir,
-                        &topic,
+                        topic,
                         uuid.clone(),
                         p,
                         cfg,
@@ -114,200 +158,135 @@ pub async fn handle_produce(
                 // EnsureExists never returns UnknownTopic (that variant is only
                 // produced by Delete); unreachable in practice, but the shared
                 // RegistryError type requires this arm to be exhaustive.
-                metrics::counter!(
-                    PRODUCE_ERRORS,
-                    &partition_label_with(
-                        &topic,
-                        partition,
-                        &[(
-                            LABEL_ERROR_CODE,
-                            format!("{}", ErrorCode::ErrInternal as i32)
-                        )],
-                    )
-                )
-                .increment(1);
-                return Frame {
-                    command: make_error(
-                        correlation_id,
-                        ErrorCode::ErrInternal,
-                        "auto-create failed: unexpected UnknownTopic",
-                    ),
-                    payload: Bytes::new(),
-                };
+                return Err(produce_error(
+                    topic,
+                    partition,
+                    correlation_id,
+                    ErrorCode::ErrInternal,
+                    "auto-create failed: unexpected UnknownTopic",
+                ));
             }
             Ok(Err(RegistryError::InvalidConfig(_))) => {
                 // EnsureExists always passes TopicConfigOverrides::default(),
                 // which is always valid; unreachable in practice, but the
                 // shared RegistryError type requires this arm to be exhaustive.
-                metrics::counter!(
-                    PRODUCE_ERRORS,
-                    &partition_label_with(
-                        &topic,
-                        partition,
-                        &[(
-                            LABEL_ERROR_CODE,
-                            format!("{}", ErrorCode::ErrInternal as i32)
-                        )],
-                    )
-                )
-                .increment(1);
-                return Frame {
-                    command: make_error(
-                        correlation_id,
-                        ErrorCode::ErrInternal,
-                        "auto-create failed: unexpected InvalidConfig",
-                    ),
-                    payload: Bytes::new(),
-                };
+                return Err(produce_error(
+                    topic,
+                    partition,
+                    correlation_id,
+                    ErrorCode::ErrInternal,
+                    "auto-create failed: unexpected InvalidConfig",
+                ));
             }
             Ok(Err(RegistryError::Io(msg))) => {
-                metrics::counter!(
-                    PRODUCE_ERRORS,
-                    &partition_label_with(
-                        &topic,
-                        partition,
-                        &[(
-                            LABEL_ERROR_CODE,
-                            format!("{}", ErrorCode::ErrInternal as i32)
-                        )],
-                    )
-                )
-                .increment(1);
-                return Frame {
-                    command: make_error(
-                        correlation_id,
-                        ErrorCode::ErrInternal,
-                        format!("auto-create failed: {msg}"),
-                    ),
-                    payload: Bytes::new(),
-                };
+                return Err(produce_error(
+                    topic,
+                    partition,
+                    correlation_id,
+                    ErrorCode::ErrInternal,
+                    format!("auto-create failed: {msg}"),
+                ));
             }
             Err(_) => {
-                metrics::counter!(
-                    PRODUCE_ERRORS,
-                    &partition_label_with(
-                        &topic,
-                        partition,
-                        &[(
-                            LABEL_ERROR_CODE,
-                            format!("{}", ErrorCode::ErrBrokerNotReady as i32)
-                        )],
-                    )
-                )
-                .increment(1);
-                return Frame {
-                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                    payload: Bytes::new(),
-                };
+                return Err(produce_error(
+                    topic,
+                    partition,
+                    correlation_id,
+                    ErrorCode::ErrBrokerNotReady,
+                    "",
+                ));
             }
         }
     }
 
-    // Resolve the partition handle — earlier than before, so the size check can read its cfg.
     let handle = {
         let guard = state.partitions.read().await;
-        guard.get(&(topic.clone(), partition)).cloned()
+        guard.get(&(topic.to_string(), partition)).cloned()
     };
-    let Some(handle) = handle else {
-        metrics::counter!(
-            PRODUCE_ERRORS,
-            &partition_label_with(
-                &topic,
-                partition,
-                &[(
-                    LABEL_ERROR_CODE,
-                    format!("{}", ErrorCode::ErrUnknownTopic as i32)
-                )],
-            )
+    handle.ok_or_else(|| {
+        produce_error(
+            topic,
+            partition,
+            correlation_id,
+            ErrorCode::ErrUnknownTopic,
+            "",
         )
-        .increment(1);
-        return Frame {
-            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
-            payload: Bytes::new(),
-        };
-    };
+    })
+}
 
-    // Per-record size check against the resolved per-topic limits.
-    for m in &records_meta {
+/// Enforce per-record key/value byte limits against the topic's resolved
+/// config. Returns the first violation as a `Frame`; `Ok(())` if every
+/// record is within limits.
+///
+/// `#[allow(clippy::result_large_err)]`: `Frame` is intentionally large
+/// (it carries a protobuf `Command`); boxing it would force
+/// `.map_err(Box::new)` at every `?` in this module without any real
+/// memory win — this helper is called exactly once per Produce RPC.
+#[allow(clippy::result_large_err)]
+fn validate_record_sizes(
+    records_meta: &[InRecordMeta],
+    handle: &PartitionHandle,
+    topic: &str,
+    partition: u32,
+    correlation_id: u64,
+) -> Result<(), Frame> {
+    for m in records_meta {
         if m.key_len > handle.cfg.max_key_size_bytes {
-            metrics::counter!(
-                PRODUCE_ERRORS,
-                &partition_label_with(
-                    &topic,
-                    partition,
-                    &[(
-                        LABEL_ERROR_CODE,
-                        format!("{}", ErrorCode::ErrKeyTooLarge as i32)
-                    )],
-                )
-            )
-            .increment(1);
-            return Frame {
-                command: make_error(
-                    correlation_id,
-                    ErrorCode::ErrKeyTooLarge,
-                    format!(
-                        "key {} bytes exceeds topic limit {} bytes",
-                        m.key_len, handle.cfg.max_key_size_bytes,
-                    ),
+            return Err(produce_error(
+                topic,
+                partition,
+                correlation_id,
+                ErrorCode::ErrKeyTooLarge,
+                format!(
+                    "key {} bytes exceeds topic limit {} bytes",
+                    m.key_len, handle.cfg.max_key_size_bytes,
                 ),
-                payload: Bytes::new(),
-            };
+            ));
         }
         if m.value_len > handle.cfg.max_value_size_bytes {
-            metrics::counter!(
-                PRODUCE_ERRORS,
-                &partition_label_with(
-                    &topic,
-                    partition,
-                    &[(
-                        LABEL_ERROR_CODE,
-                        format!("{}", ErrorCode::ErrRecordTooLarge as i32)
-                    )],
-                )
-            )
-            .increment(1);
-            return Frame {
-                command: make_error(
-                    correlation_id,
-                    ErrorCode::ErrRecordTooLarge,
-                    format!(
-                        "value {} bytes exceeds topic limit {} bytes",
-                        m.value_len, handle.cfg.max_value_size_bytes,
-                    ),
+            return Err(produce_error(
+                topic,
+                partition,
+                correlation_id,
+                ErrorCode::ErrRecordTooLarge,
+                format!(
+                    "value {} bytes exceeds topic limit {} bytes",
+                    m.value_len, handle.cfg.max_value_size_bytes,
                 ),
-                payload: Bytes::new(),
-            };
+            ));
         }
     }
+    Ok(())
+}
 
-    // Slice payload into per-record (key, value) pairs using the metas.
+/// Chunk `payload` into `IncomingRecord`s using the declared `(key_len,
+/// value_len)` pairs in `records_meta`. Malformed frame — payload shorter
+/// or longer than the declared sizes — returns `ErrMalformedFrame`.
+///
+/// `#[allow(clippy::result_large_err)]`: same rationale as
+/// `validate_record_sizes` — one call site per Produce RPC, `Frame` is
+/// intentionally large.
+#[allow(clippy::result_large_err)]
+fn slice_payload(
+    records_meta: Vec<InRecordMeta>,
+    payload: Bytes,
+    topic: &str,
+    partition: u32,
+    correlation_id: u64,
+) -> Result<Vec<IncomingRecord>, Frame> {
     let mut records = Vec::with_capacity(records_meta.len());
     let mut cursor = 0usize;
     for m in &records_meta {
         let kl = m.key_len as usize;
         let vl = m.value_len as usize;
         if cursor + kl + vl > payload.len() {
-            metrics::counter!(
-                PRODUCE_ERRORS,
-                &partition_label_with(
-                    &topic,
-                    partition,
-                    &[(
-                        LABEL_ERROR_CODE,
-                        format!("{}", ErrorCode::ErrMalformedFrame as i32)
-                    )],
-                )
-            )
-            .increment(1);
-            return Frame {
-                command: make_error(
-                    correlation_id,
-                    ErrorCode::ErrMalformedFrame,
-                    "produce payload shorter than declared record sizes",
-                ),
-                payload: Bytes::new(),
-            };
+            return Err(produce_error(
+                topic,
+                partition,
+                correlation_id,
+                ErrorCode::ErrMalformedFrame,
+                "produce payload shorter than declared record sizes",
+            ));
         }
         let key = payload.slice(cursor..cursor + kl).to_vec();
         let value = payload.slice(cursor + kl..cursor + kl + vl).to_vec();
@@ -320,32 +299,32 @@ pub async fn handle_produce(
         });
     }
     if cursor != payload.len() {
-        metrics::counter!(
-            PRODUCE_ERRORS,
-            &partition_label_with(
-                &topic,
-                partition,
-                &[(
-                    LABEL_ERROR_CODE,
-                    format!("{}", ErrorCode::ErrMalformedFrame as i32)
-                )],
-            )
-        )
-        .increment(1);
-        return Frame {
-            command: make_error(
-                correlation_id,
-                ErrorCode::ErrMalformedFrame,
-                "produce payload longer than declared record sizes",
-            ),
-            payload: Bytes::new(),
-        };
+        return Err(produce_error(
+            topic,
+            partition,
+            correlation_id,
+            ErrorCode::ErrMalformedFrame,
+            "produce payload longer than declared record sizes",
+        ));
     }
+    Ok(records)
+}
 
-    let __topic = topic.clone();
-    let __bytes: u64 = records_meta
+/// Send the records to the partition writer, await the WAL-fsync ack, and
+/// emit success-path metrics. Always returns a `Frame` — either the
+/// `ProduceResponse` with assigned offsets, or an `ErrBrokerNotReady` if
+/// the writer's channel is gone.
+async fn commit_records(
+    handle: &PartitionHandle,
+    records: Vec<IncomingRecord>,
+    topic: &str,
+    partition: u32,
+    correlation_id: u64,
+    start: std::time::Instant,
+) -> Frame {
+    let request_bytes: u64 = records
         .iter()
-        .map(|m| (m.key_len + m.value_len) as u64)
+        .map(|r| (r.key.len() + r.value.len()) as u64)
         .sum();
     let n = records.len() as i64;
     let (ack, ack_rx) = oneshot::channel::<i64>();
@@ -355,30 +334,21 @@ pub async fn handle_produce(
         .await
         .is_err()
     {
-        metrics::counter!(
-            PRODUCE_ERRORS,
-            &partition_label_with(
-                &topic,
-                partition,
-                &[(
-                    LABEL_ERROR_CODE,
-                    format!("{}", ErrorCode::ErrBrokerNotReady as i32)
-                )],
-            )
-        )
-        .increment(1);
-        return Frame {
-            command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-            payload: Bytes::new(),
-        };
+        return produce_error(
+            topic,
+            partition,
+            correlation_id,
+            ErrorCode::ErrBrokerNotReady,
+            "",
+        );
     }
     match ack_rx.await {
         Ok(hwm) => {
-            let __labels = partition_label(&__topic, partition);
-            metrics::counter!(PRODUCE_RECORDS, &__labels).increment(n as u64);
-            metrics::counter!(PRODUCE_BYTES, &__labels).increment(__bytes);
-            metrics::histogram!(PRODUCE_LATENCY_MS, &__labels)
-                .record(__start.elapsed().as_secs_f64() * 1000.0);
+            let labels = partition_label(topic, partition);
+            metrics::counter!(PRODUCE_RECORDS, &labels).increment(n as u64);
+            metrics::counter!(PRODUCE_BYTES, &labels).increment(request_bytes);
+            metrics::histogram!(PRODUCE_LATENCY_MS, &labels)
+                .record(start.elapsed().as_secs_f64() * 1000.0);
             Frame {
                 command: Command {
                     correlation_id,
@@ -391,23 +361,12 @@ pub async fn handle_produce(
                 payload: Bytes::new(),
             }
         }
-        Err(_) => {
-            metrics::counter!(
-                PRODUCE_ERRORS,
-                &partition_label_with(
-                    &topic,
-                    partition,
-                    &[(
-                        LABEL_ERROR_CODE,
-                        format!("{}", ErrorCode::ErrBrokerNotReady as i32)
-                    )],
-                )
-            )
-            .increment(1);
-            Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            }
-        }
+        Err(_) => produce_error(
+            topic,
+            partition,
+            correlation_id,
+            ErrorCode::ErrBrokerNotReady,
+            "",
+        ),
     }
 }

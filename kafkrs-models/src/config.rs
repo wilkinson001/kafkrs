@@ -44,6 +44,18 @@ pub struct BrokerConfig {
     /// on restart, or auto-generated (`brk-<8hex>`) and persisted on first boot.
     #[serde(default)]
     pub id: Option<String>,
+    /// Externally-reachable address for this broker. Advertised to clients
+    /// via `ConnectedResponse` and `Metadata` responses. If unset, falls
+    /// back to the broker's bind `address` — which is useless when the
+    /// broker binds `0.0.0.0` in a container. Set this to the routable
+    /// hostname or IP clients should use to reach the broker.
+    #[serde(default)]
+    pub advertised_address: Option<String>,
+    /// Externally-reachable port for this broker. Advertised alongside
+    /// `advertised_address`. If unset, falls back to the first entry of
+    /// `ports.wire`.
+    #[serde(default)]
+    pub advertised_port: Option<u16>,
 }
 
 impl Default for BrokerConfig {
@@ -56,6 +68,8 @@ impl Default for BrokerConfig {
             metrics_high_cardinality: false,
             cluster_id: None,
             id: None,
+            advertised_address: None,
+            advertised_port: None,
         }
     }
 }
@@ -406,5 +420,58 @@ region = "us-east-1"
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.broker.cluster_id, None);
         assert_eq!(cfg.broker.id, None);
+    }
+
+    #[test]
+    fn broker_advertised_address_and_port_parse_when_set() {
+        let toml = r#"
+address = "0.0.0.0"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[broker]
+cluster_id = "prod-east"
+advertised_address = "broker-1.prod.internal"
+advertised_port = 9092
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            cfg.broker.advertised_address.as_deref(),
+            Some("broker-1.prod.internal")
+        );
+        assert_eq!(cfg.broker.advertised_port, Some(9092));
+    }
+
+    #[test]
+    fn broker_advertised_fields_default_to_none() {
+        let toml = r#"
+address = "127.0.0.1"
+data_dir = "./data"
+
+[ports]
+wire = [5432]
+
+[broker]
+cluster_id = "prod-east"
+
+[object_store]
+backend = "filesystem"
+bucket = "b"
+prefix = ""
+endpoint = ""
+region = "us-east-1"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.broker.advertised_address, None);
+        assert_eq!(cfg.broker.advertised_port, None);
     }
 }

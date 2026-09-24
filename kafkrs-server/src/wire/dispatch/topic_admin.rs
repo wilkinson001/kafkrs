@@ -103,8 +103,19 @@ pub async fn handle_describe_topic(
             payload: Bytes::new(),
         };
     }
-    match rx.await.ok().flatten() {
-        Some(entry) => Frame {
+    // Distinguish a closed reply channel (registry actor died — client sees
+    // ErrBrokerNotReady) from a legitimate "topic doesn't exist" answer
+    // (ErrUnknownTopic). Prior code conflated both via `.ok().flatten()`.
+    match rx.await {
+        Err(_) => Frame {
+            command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+            payload: Bytes::new(),
+        },
+        Ok(None) => Frame {
+            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
+            payload: Bytes::new(),
+        },
+        Ok(Some(entry)) => Frame {
             command: Command {
                 correlation_id,
                 body: Some(Body::DescribeTopicResp(DescribeTopicResponse {
@@ -114,10 +125,6 @@ pub async fn handle_describe_topic(
                     config: Some(model_overrides_to_wire(entry.config)),
                 })),
             },
-            payload: Bytes::new(),
-        },
-        None => Frame {
-            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
             payload: Bytes::new(),
         },
     }
@@ -154,42 +161,12 @@ pub async fn handle_delete_topic(
     let topic = req.topic.clone();
     let delete_data = req.delete_data.unwrap_or(true);
 
-    // Capture the UUID + partition count BEFORE the registry removes the
-    // entry, because we need them to look up partition handles and to
-    // construct keys for the manifest snapshot below.
-    let describe_reply = {
-        let (tx, rx) = oneshot::channel();
-        if state
-            .registry
-            .send(RegistryMsg::Describe {
-                name: topic.clone(),
-                reply: tx,
-            })
-            .await
-            .is_err()
-        {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
-        }
-        rx.await.ok().flatten()
-    };
-    let entry = match describe_reply {
-        None => {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
-                payload: Bytes::new(),
-            };
-        }
-        Some(e) => e,
-    };
-    let topic_uuid = entry.uuid.clone();
-    let partition_count = entry.partition_count;
-
-    // Ask the registry to atomically remove + persist. If Describe raced
-    // with a concurrent Delete, this call gets UnknownTopic.
-    let del_reply = {
+    // Ask the registry to atomically remove + persist, returning the topic's
+    // uuid + partition_count in the same message. Previously we did a
+    // separate Describe first, which opened a Describe → Delete TOCTOU where
+    // a concurrent Delete could win between the two calls. Bundling both
+    // into Delete's reply closes that window.
+    let (topic_uuid, partition_count) = {
         let (tx, rx) = oneshot::channel();
         if state
             .registry
@@ -206,45 +183,55 @@ pub async fn handle_delete_topic(
                 payload: Bytes::new(),
             };
         }
-        rx.await.ok()
+        match rx.await {
+            Err(_) => {
+                return Frame {
+                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                    payload: Bytes::new(),
+                };
+            }
+            Ok(Err(e)) => {
+                return Frame {
+                    command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
+                    payload: Bytes::new(),
+                };
+            }
+            Ok(Ok((uuid, pcount))) => (uuid, pcount),
+        }
     };
-    match del_reply {
-        Some(Ok(())) => {}
-        Some(Err(e)) => {
-            return Frame {
-                command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
-                payload: Bytes::new(),
-            };
-        }
-        None => {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
-        }
-    }
 
     // Registry entry is gone. Now shut down partition actors, remove them
     // from state.partitions, clean spawn_locks, remove the WAL directory,
     // and (if delete_data) snapshot manifests + append a pending-delete
     // record + spawn the sweep.
-    let mut handles_to_shutdown: Vec<PartitionHandle> =
+    let mut handles_to_shutdown: Vec<(u32, PartitionHandle)> =
         Vec::with_capacity(partition_count as usize);
     {
         let mut guard = state.partitions.write().await;
         for p in 0..partition_count {
             if let Some(h) = guard.remove(&(topic.clone(), p)) {
-                handles_to_shutdown.push(h);
+                handles_to_shutdown.push((p, h));
             }
         }
     }
 
     // Send Shutdown to each partition writer and await its ack so the WAL
-    // and manifest state are quiesced before this RPC responds.
-    for h in &handles_to_shutdown {
+    // and manifest state are quiesced before this RPC responds. A timeout
+    // here indicates a stuck writer — log so ops can distinguish the
+    // failing incarnation from any later same-name topic (uuid identifies
+    // this topic's specific instance).
+    for (partition, h) in &handles_to_shutdown {
         let (ack_tx, ack_rx) = oneshot::channel();
         let _ = h.pw_tx.send(PwMsg::Shutdown { ack: ack_tx }).await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx)
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "partition_writer shutdown ack timeout: topic={topic} partition={partition} uuid={}",
+                h.uuid
+            );
+        }
     }
 
     // Send Shutdown to each partition's Uploader and await its ack. The
@@ -253,13 +240,21 @@ pub async fn handle_delete_topic(
     // this Shutdown message guarantees the segment PUT + manifest update
     // are durable before we snapshot manifests below (spec invariant:
     // WAL/manifest state is quiesced when the client sees success).
-    for h in &handles_to_shutdown {
+    for (partition, h) in &handles_to_shutdown {
         let (ack_tx, ack_rx) = oneshot::channel();
         let _ = h
             .uploader_tx
             .send(crate::uploader::UploaderMsg::Shutdown { ack: ack_tx })
             .await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx)
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "uploader shutdown ack timeout: topic={topic} partition={partition} uuid={}",
+                h.uuid
+            );
+        }
     }
 
     // Clean up spawn_locks entries for this topic's partitions.

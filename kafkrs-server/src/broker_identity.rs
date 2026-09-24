@@ -56,9 +56,11 @@ fn resolve_broker_id(cfg_id: &Option<String>, data_dir: &Path) -> Result<String,
     }
     let path = data_dir.join("broker_id");
     if path.exists() {
-        return std::fs::read_to_string(&path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| IdentityError::IoError(format!("read {}: {e}", path.display())));
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| IdentityError::IoError(format!("read {}: {e}", path.display())))?;
+        let trimmed = raw.trim().to_string();
+        validate_persisted_broker_id(&trimmed, &path)?;
+        return Ok(trimmed);
     }
     let id = generate_broker_id();
     // Ensure data_dir exists — fresh install / container start where the operator
@@ -67,9 +69,60 @@ fn resolve_broker_id(cfg_id: &Option<String>, data_dir: &Path) -> Result<String,
     std::fs::create_dir_all(data_dir).map_err(|e| {
         IdentityError::IoError(format!("create data_dir {}: {e}", data_dir.display()))
     })?;
-    std::fs::write(&path, &id)
-        .map_err(|e| IdentityError::IoError(format!("write {}: {e}", path.display())))?;
+    atomic_write_broker_id(&path, &id)?;
     Ok(id)
+}
+
+/// Reject empty / whitespace-only / non-printable persisted values.
+///
+/// A crash between `File::create` and `write_all` on the previous
+/// non-atomic persist path could leave a truncated `broker_id` file. Under
+/// that path the trimmed contents would be empty — the broker would boot
+/// silently with an empty identity, and the cluster would treat the
+/// restarted broker as a new one. Validating on read catches that class
+/// of corruption and gives ops a clear signal.
+fn validate_persisted_broker_id(id: &str, path: &Path) -> Result<(), IdentityError> {
+    if id.is_empty() {
+        return Err(IdentityError::IoError(format!(
+            "broker_id file {} is empty or whitespace-only \
+             (possibly corrupted mid-write; delete the file to auto-regenerate)",
+            path.display()
+        )));
+    }
+    if !id.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(IdentityError::IoError(format!(
+            "broker_id file {} contains non-printable characters \
+             (possibly corrupted mid-write; delete the file to auto-regenerate)",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Write the broker_id atomically: tmp file → fsync → rename. Mirrors the
+/// pattern in `topic_registry::atomic_write_registry`. Guarantees that
+/// after this returns, the `broker_id` file is either the full new value
+/// or completely absent — never a truncated/partial state a subsequent
+/// boot could read as garbage.
+fn atomic_write_broker_id(path: &Path, id: &str) -> Result<(), IdentityError> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| IdentityError::IoError(format!("create {}: {e}", tmp.display())))?;
+        f.write_all(id.as_bytes())
+            .map_err(|e| IdentityError::IoError(format!("write {}: {e}", tmp.display())))?;
+        f.sync_all()
+            .map_err(|e| IdentityError::IoError(format!("fsync {}: {e}", tmp.display())))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        IdentityError::IoError(format!(
+            "rename {} → {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Generate a fresh broker identifier of the form `brk-<8 lowercase hex chars>`.
@@ -213,5 +266,60 @@ mod tests {
         // With 32 bits of entropy the collision probability is ~2^-32. Passing
         // twice guards against a stub implementation.
         assert_ne!(a, b, "generate_broker_id produced duplicate value");
+    }
+
+    #[test]
+    fn resolve_rejects_empty_persisted_broker_id() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("broker_id"), "").unwrap();
+        let cfg = cfg_with(Some("prod-east"), None);
+        match resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()) {
+            Err(IdentityError::IoError(msg)) => {
+                assert!(msg.contains("empty"), "expected empty-file error, got: {msg}");
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_whitespace_only_persisted_broker_id() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("broker_id"), "   \n\t  ").unwrap();
+        let cfg = cfg_with(Some("prod-east"), None);
+        match resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()) {
+            Err(IdentityError::IoError(msg)) => {
+                assert!(msg.contains("empty"), "expected empty-file error, got: {msg}");
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_broker_id_with_control_chars() {
+        let dir = tempdir().unwrap();
+        // Interior NUL byte — plausible corruption from a partial write on
+        // a pre-zeroed disk block.
+        std::fs::write(dir.path().join("broker_id"), "brk-\0abc123").unwrap();
+        let cfg = cfg_with(Some("prod-east"), None);
+        match resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()) {
+            Err(IdentityError::IoError(msg)) => {
+                assert!(
+                    msg.contains("non-printable"),
+                    "expected non-printable error, got: {msg}"
+                );
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_boot_atomic_write_leaves_no_tmp_file() {
+        let dir = tempdir().unwrap();
+        let cfg = cfg_with(Some("prod-east"), None);
+        resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()).unwrap();
+        // The atomic-write path uses `broker_id.tmp` → rename → `broker_id`.
+        // If rename lands, the tmp path is gone.
+        assert!(!dir.path().join("broker_id.tmp").exists());
+        assert!(dir.path().join("broker_id").exists());
     }
 }

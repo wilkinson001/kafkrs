@@ -42,11 +42,18 @@ pub fn resolve_identity(
         .clone()
         .ok_or(IdentityError::MissingClusterId)?;
     let broker_id = resolve_broker_id(&cfg.id, data_dir)?;
+    // Prefer `broker.advertised_address` / `broker.advertised_port` when set
+    // (the routable value ops wants clients to see); fall back to bind
+    // address + first wire port. A broker binding `0.0.0.0` in a container
+    // NEEDS the override — its bind address is not a client-reachable
+    // value.
+    let advertised_host = cfg.advertised_address.clone().unwrap_or_else(|| address.to_string());
+    let advertised_port = cfg.advertised_port.unwrap_or(wire_port);
     Ok(BrokerIdentity {
         broker_id: Arc::from(broker_id),
         cluster_id: Arc::from(cluster_id),
-        advertised_host: Arc::from(address.to_string()),
-        advertised_port: wire_port,
+        advertised_host: Arc::from(advertised_host),
+        advertised_port,
     })
 }
 
@@ -148,6 +155,19 @@ mod tests {
         BrokerConfig {
             cluster_id: cluster_id.map(String::from),
             id: id.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    fn cfg_with_advertised(
+        cluster_id: Option<&str>,
+        advertised_address: Option<&str>,
+        advertised_port: Option<u16>,
+    ) -> BrokerConfig {
+        BrokerConfig {
+            cluster_id: cluster_id.map(String::from),
+            advertised_address: advertised_address.map(String::from),
+            advertised_port,
             ..Default::default()
         }
     }
@@ -275,7 +295,10 @@ mod tests {
         let cfg = cfg_with(Some("prod-east"), None);
         match resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()) {
             Err(IdentityError::IoError(msg)) => {
-                assert!(msg.contains("empty"), "expected empty-file error, got: {msg}");
+                assert!(
+                    msg.contains("empty"),
+                    "expected empty-file error, got: {msg}"
+                );
             }
             other => panic!("expected IoError, got {other:?}"),
         }
@@ -288,7 +311,10 @@ mod tests {
         let cfg = cfg_with(Some("prod-east"), None);
         match resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()) {
             Err(IdentityError::IoError(msg)) => {
-                assert!(msg.contains("empty"), "expected empty-file error, got: {msg}");
+                assert!(
+                    msg.contains("empty"),
+                    "expected empty-file error, got: {msg}"
+                );
             }
             other => panic!("expected IoError, got {other:?}"),
         }
@@ -310,6 +336,44 @@ mod tests {
             }
             other => panic!("expected IoError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_uses_advertised_address_override_when_set() {
+        let dir = tempdir().unwrap();
+        let cfg = cfg_with_advertised(Some("prod-east"), Some("public.example.com"), None);
+        let ident = resolve_identity(&cfg, "0.0.0.0", 5432, dir.path()).unwrap();
+        assert_eq!(&*ident.advertised_host, "public.example.com");
+        // Port falls back to bind wire_port when advertised_port unset.
+        assert_eq!(ident.advertised_port, 5432);
+    }
+
+    #[test]
+    fn resolve_uses_advertised_port_override_when_set() {
+        let dir = tempdir().unwrap();
+        let cfg = cfg_with_advertised(Some("prod-east"), None, Some(9092));
+        let ident = resolve_identity(&cfg, "127.0.0.1", 5432, dir.path()).unwrap();
+        assert_eq!(ident.advertised_port, 9092);
+        // Host falls back to bind address when advertised_address unset.
+        assert_eq!(&*ident.advertised_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn resolve_uses_both_advertised_overrides_when_set() {
+        let dir = tempdir().unwrap();
+        let cfg = cfg_with_advertised(Some("prod-east"), Some("broker-3.k8s.local"), Some(9092));
+        let ident = resolve_identity(&cfg, "0.0.0.0", 5432, dir.path()).unwrap();
+        assert_eq!(&*ident.advertised_host, "broker-3.k8s.local");
+        assert_eq!(ident.advertised_port, 9092);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_bind_when_no_advertised_config() {
+        let dir = tempdir().unwrap();
+        let cfg = cfg_with(Some("prod-east"), None);
+        let ident = resolve_identity(&cfg, "192.168.1.10", 5432, dir.path()).unwrap();
+        assert_eq!(&*ident.advertised_host, "192.168.1.10");
+        assert_eq!(ident.advertised_port, 5432);
     }
 
     #[test]

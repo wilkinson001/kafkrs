@@ -11,17 +11,14 @@
 
 mod labels;
 pub mod names;
+mod runtime;
 
 pub use labels::{partition_label, partition_label_with};
 pub use names::*;
+pub use runtime::uptime_updater;
 
 use kafkrs_models::config::PortsConfig;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::Instant;
-
-/// Process start time, set once at `init`. Read by `uptime_updater`.
-static START_TIME: OnceLock<Instant> = OnceLock::new();
 
 /// Readiness flag: `false` until [`set_ready`] flips it. Read by the `/ready`
 /// admin-port route to distinguish "process alive but not yet accepting
@@ -69,9 +66,8 @@ pub fn init(ports: &PortsConfig, high_cardinality: bool) -> anyhow::Result<()> {
         let handle = PrometheusBuilder::new()
             .set_buckets(LATENCY_BUCKETS_MS)?
             .install_recorder()?;
-        START_TIME.set(Instant::now()).ok();
+        runtime::install();
         describe_all();
-        emit_build_info();
         Some(handle)
     } else {
         None
@@ -245,34 +241,6 @@ async fn handle_admin_conn(
     sock.write_all(response.as_bytes()).await?;
     sock.shutdown().await.ok();
     Ok(())
-}
-
-/// Emit `RUNTIME_BUILD_INFO` once at boot: a constant-1 gauge carrying the
-/// broker's version and (optionally, compile-time-injected) git SHA as
-/// labels. Scraping this metric family tells you which build is running.
-fn emit_build_info() {
-    let version = env!("CARGO_PKG_VERSION");
-    let git_sha = option_env!("KAFKRS_GIT_SHA").unwrap_or("unknown");
-    metrics::gauge!(
-        RUNTIME_BUILD_INFO,
-        LABEL_VERSION => version,
-        LABEL_GIT_SHA => git_sha
-    )
-    .set(1.0);
-}
-
-/// Background task: every 10s, set `RUNTIME_UPTIME_SECONDS` to the elapsed
-/// time since `init` recorded `START_TIME`. Must be spawned by the caller
-/// on a live tokio runtime after `init` returns — see [`init`]'s doc comment.
-pub async fn uptime_updater() {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
-    loop {
-        ticker.tick().await;
-        if let Some(start) = START_TIME.get() {
-            let uptime = start.elapsed().as_secs_f64();
-            metrics::gauge!(RUNTIME_UPTIME_SECONDS).set(uptime);
-        }
-    }
 }
 
 /// Register HELP text and units for every metric the broker emits.

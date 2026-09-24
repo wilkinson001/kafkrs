@@ -192,11 +192,7 @@ pub async fn handle_delete_topic(
             }
             Ok(Err(e)) => {
                 return Frame {
-                    command: make_error(
-                        correlation_id,
-                        registry_error_code(&e),
-                        format!("{e:?}"),
-                    ),
+                    command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
                     payload: Bytes::new(),
                 };
             }

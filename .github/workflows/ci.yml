@@ -88,7 +88,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build broker binary
-        run: cargo build --release --bin kafkrs-server
+        # Debug mode: reuses the target/debug cache primed by rust-test /
+        # rust-lint. The smoke test only cares that the binary boots and
+        # /health responds — release-mode optimisation buys nothing here.
+        run: cargo build --bin kafkrs-server
       - name: Boot broker against fresh data_dir and poll /health
         run: |
           set -euo pipefail
@@ -98,7 +101,7 @@ jobs:
           # Launch broker in background, capturing logs for diagnosis on
           # failure. RUST_LOG=info surfaces the identity-resolution / listen
           # lines so we can tell why a boot failed.
-          RUST_LOG=info ./target/release/kafkrs-server .github/smoke.toml \
+          RUST_LOG=info ./target/debug/kafkrs-server .github/smoke.toml \
             > smoke_broker.log 2>&1 &
           BROKER_PID=$!
           trap 'kill $BROKER_PID 2>/dev/null || true; rm -rf ./smoke_data' EXIT

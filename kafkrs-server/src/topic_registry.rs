@@ -43,10 +43,14 @@ pub enum RegistryMsg {
     /// `SharedState`. The registry stays focused on its file-of-truth role.
     /// `delete_data` is carried through for uniformity but unused here — the
     /// dispatch handler decides sweep vs skip based on it.
+    ///
+    /// Returns `(uuid, partition_count)` on success so the caller can shut
+    /// down actors, snapshot manifests, and construct object-store keys
+    /// without a preceding `Describe` (which would open a TOCTOU window).
     Delete {
         name: String,
         delete_data: bool,
-        reply: oneshot::Sender<Result<(), RegistryError>>,
+        reply: oneshot::Sender<Result<(String, u32), RegistryError>>,
     },
     /// Merge a partial-patch of `TopicConfigOverrides` onto the topic's
     /// current config, validate the merged result, and persist to
@@ -179,16 +183,18 @@ impl TopicRegistry {
         }
     }
 
-    async fn delete(&mut self, name: &str) -> Result<(), RegistryError> {
+    async fn delete(&mut self, name: &str) -> Result<(String, u32), RegistryError> {
         let entry = match self.topics.remove(name) {
             None => return Err(RegistryError::UnknownTopic),
             Some(e) => e,
         };
+        let uuid = entry.uuid.clone();
+        let partition_count = entry.partition_count;
         let next: TopicRegistryFile = TopicRegistryFile {
             topics: self.topics.values().cloned().collect(),
         };
         match atomic_write_registry(&self.data_dir, &next) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok((uuid, partition_count)),
             Err(e) => {
                 // Persistence failed — roll back the in-memory removal so the
                 // registry stays consistent with topics.json on disk.

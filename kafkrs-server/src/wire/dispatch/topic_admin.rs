@@ -161,42 +161,12 @@ pub async fn handle_delete_topic(
     let topic = req.topic.clone();
     let delete_data = req.delete_data.unwrap_or(true);
 
-    // Capture the UUID + partition count BEFORE the registry removes the
-    // entry, because we need them to look up partition handles and to
-    // construct keys for the manifest snapshot below.
-    let describe_reply = {
-        let (tx, rx) = oneshot::channel();
-        if state
-            .registry
-            .send(RegistryMsg::Describe {
-                name: topic.clone(),
-                reply: tx,
-            })
-            .await
-            .is_err()
-        {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
-        }
-        rx.await.ok().flatten()
-    };
-    let entry = match describe_reply {
-        None => {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
-                payload: Bytes::new(),
-            };
-        }
-        Some(e) => e,
-    };
-    let topic_uuid = entry.uuid.clone();
-    let partition_count = entry.partition_count;
-
-    // Ask the registry to atomically remove + persist. If Describe raced
-    // with a concurrent Delete, this call gets UnknownTopic.
-    let del_reply = {
+    // Ask the registry to atomically remove + persist, returning the topic's
+    // uuid + partition_count in the same message. Previously we did a
+    // separate Describe first, which opened a Describe → Delete TOCTOU where
+    // a concurrent Delete could win between the two calls. Bundling both
+    // into Delete's reply closes that window.
+    let (topic_uuid, partition_count) = {
         let (tx, rx) = oneshot::channel();
         if state
             .registry
@@ -213,23 +183,26 @@ pub async fn handle_delete_topic(
                 payload: Bytes::new(),
             };
         }
-        rx.await.ok()
+        match rx.await {
+            Err(_) => {
+                return Frame {
+                    command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+                    payload: Bytes::new(),
+                };
+            }
+            Ok(Err(e)) => {
+                return Frame {
+                    command: make_error(
+                        correlation_id,
+                        registry_error_code(&e),
+                        format!("{e:?}"),
+                    ),
+                    payload: Bytes::new(),
+                };
+            }
+            Ok(Ok((uuid, pcount))) => (uuid, pcount),
+        }
     };
-    match del_reply {
-        Some(Ok(())) => {}
-        Some(Err(e)) => {
-            return Frame {
-                command: make_error(correlation_id, registry_error_code(&e), format!("{e:?}")),
-                payload: Bytes::new(),
-            };
-        }
-        None => {
-            return Frame {
-                command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
-                payload: Bytes::new(),
-            };
-        }
-    }
 
     // Registry entry is gone. Now shut down partition actors, remove them
     // from state.partitions, clean spawn_locks, remove the WAL directory,

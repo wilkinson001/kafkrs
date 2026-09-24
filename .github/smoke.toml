@@ -1,0 +1,28 @@
+# Config for the fresh-install CI smoke test (.github/workflows/ci.yml).
+# Points at ./smoke_data — the CI job removes that directory first so the
+# `resolve_identity` fresh-install path (create data_dir + generate broker_id
+# + persist) actually gets exercised. The regression this guards against was
+# a resolve_identity failure when the data_dir did not exist yet, which
+# only human review caught during metadata_rpc final review.
+
+address = "127.0.0.1"
+data_dir = "./smoke_data"
+
+[ports]
+wire = [5432]
+# Health endpoint on its own port so the smoke test can poll /health without
+# needing to install a Prometheus recorder.
+health = 9465
+
+[broker]
+disk_type = "nvme"
+auto_create_topics = false
+default_partition_count = 1
+cluster_id = "smoke-test"
+
+[object_store]
+backend = "filesystem"
+bucket = "smoke"
+prefix = ""
+endpoint = ""
+region = "us-east-1"

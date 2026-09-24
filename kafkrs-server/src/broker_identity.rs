@@ -47,7 +47,10 @@ pub fn resolve_identity(
     // address + first wire port. A broker binding `0.0.0.0` in a container
     // NEEDS the override — its bind address is not a client-reachable
     // value.
-    let advertised_host = cfg.advertised_address.clone().unwrap_or_else(|| address.to_string());
+    let advertised_host = cfg
+        .advertised_address
+        .clone()
+        .unwrap_or_else(|| address.to_string());
     let advertised_port = cfg.advertised_port.unwrap_or(wire_port);
     Ok(BrokerIdentity {
         broker_id: Arc::from(broker_id),

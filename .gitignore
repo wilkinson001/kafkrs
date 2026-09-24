@@ -3,3 +3,6 @@
 target/
 data/
 .claude/
+# fresh-install smoke test artifacts (CI + local dry-run)
+smoke_data/
+smoke_broker.log

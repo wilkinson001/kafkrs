@@ -65,11 +65,9 @@ pub enum LocateResult {
 pub struct PartitionWriter {
     data_dir: String,
     topic: String,
-    /// Not read directly by `PartitionWriter` today (only the Uploader builds
-    /// segment/manifest keys); kept here so the writer's identity matches the
-    /// rest of the partition actor chain and is available to later
-    /// DeleteTopic work (e.g. self-description in logs/metrics).
-    #[allow(dead_code)]
+    /// UUIDv7 for this topic incarnation. Used in shutdown log lines to
+    /// distinguish this writer from a subsequent same-name topic's writer
+    /// after a Delete + Create cycle.
     topic_uuid: String,
     partition: u32,
     cfg: ResolvedTopicConfig,
@@ -181,9 +179,10 @@ impl PartitionWriter {
                             // isn't deleted with delete_data=true.
                             if let Err(e) = self.seal_and_handoff().await {
                                 log::warn!(
-                                    "partition_writer {}::{} shutdown seal failed: {e:?}",
+                                    "partition_writer shutdown seal failed: topic={} partition={} uuid={} error={e:?}",
                                     self.topic,
-                                    self.partition
+                                    self.partition,
+                                    self.topic_uuid,
                                 );
                             }
                             let _ = ack.send(());

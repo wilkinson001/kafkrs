@@ -228,23 +228,34 @@ pub async fn handle_delete_topic(
     // from state.partitions, clean spawn_locks, remove the WAL directory,
     // and (if delete_data) snapshot manifests + append a pending-delete
     // record + spawn the sweep.
-    let mut handles_to_shutdown: Vec<PartitionHandle> =
+    let mut handles_to_shutdown: Vec<(u32, PartitionHandle)> =
         Vec::with_capacity(partition_count as usize);
     {
         let mut guard = state.partitions.write().await;
         for p in 0..partition_count {
             if let Some(h) = guard.remove(&(topic.clone(), p)) {
-                handles_to_shutdown.push(h);
+                handles_to_shutdown.push((p, h));
             }
         }
     }
 
     // Send Shutdown to each partition writer and await its ack so the WAL
-    // and manifest state are quiesced before this RPC responds.
-    for h in &handles_to_shutdown {
+    // and manifest state are quiesced before this RPC responds. A timeout
+    // here indicates a stuck writer — log so ops can distinguish the
+    // failing incarnation from any later same-name topic (uuid identifies
+    // this topic's specific instance).
+    for (partition, h) in &handles_to_shutdown {
         let (ack_tx, ack_rx) = oneshot::channel();
         let _ = h.pw_tx.send(PwMsg::Shutdown { ack: ack_tx }).await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx)
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "partition_writer shutdown ack timeout: topic={topic} partition={partition} uuid={}",
+                h.uuid
+            );
+        }
     }
 
     // Send Shutdown to each partition's Uploader and await its ack. The
@@ -253,13 +264,21 @@ pub async fn handle_delete_topic(
     // this Shutdown message guarantees the segment PUT + manifest update
     // are durable before we snapshot manifests below (spec invariant:
     // WAL/manifest state is quiesced when the client sees success).
-    for h in &handles_to_shutdown {
+    for (partition, h) in &handles_to_shutdown {
         let (ack_tx, ack_rx) = oneshot::channel();
         let _ = h
             .uploader_tx
             .send(crate::uploader::UploaderMsg::Shutdown { ack: ack_tx })
             .await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx)
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "uploader shutdown ack timeout: topic={topic} partition={partition} uuid={}",
+                h.uuid
+            );
+        }
     }
 
     // Clean up spawn_locks entries for this topic's partitions.

@@ -103,8 +103,19 @@ pub async fn handle_describe_topic(
             payload: Bytes::new(),
         };
     }
-    match rx.await.ok().flatten() {
-        Some(entry) => Frame {
+    // Distinguish a closed reply channel (registry actor died — client sees
+    // ErrBrokerNotReady) from a legitimate "topic doesn't exist" answer
+    // (ErrUnknownTopic). Prior code conflated both via `.ok().flatten()`.
+    match rx.await {
+        Err(_) => Frame {
+            command: make_error(correlation_id, ErrorCode::ErrBrokerNotReady, ""),
+            payload: Bytes::new(),
+        },
+        Ok(None) => Frame {
+            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
+            payload: Bytes::new(),
+        },
+        Ok(Some(entry)) => Frame {
             command: Command {
                 correlation_id,
                 body: Some(Body::DescribeTopicResp(DescribeTopicResponse {
@@ -114,10 +125,6 @@ pub async fn handle_describe_topic(
                     config: Some(model_overrides_to_wire(entry.config)),
                 })),
             },
-            payload: Bytes::new(),
-        },
-        None => Frame {
-            command: make_error(correlation_id, ErrorCode::ErrUnknownTopic, ""),
             payload: Bytes::new(),
         },
     }

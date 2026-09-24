@@ -4,7 +4,9 @@
 mod common;
 use common::*;
 
-use kafkrs_models::wire::v1::{command::Body, Command, ConnectRequest, InRecordMeta, ProduceRequest};
+use kafkrs_models::wire::v1::{
+    command::Body, Command, ConnectRequest, InRecordMeta, ProduceRequest,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 

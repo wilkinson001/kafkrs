@@ -6,7 +6,11 @@ build-backend = "hatchling.build"
 name = "kafkrs"
 version = "0.7.0"
 description = "Pure-Python async client for the kafkrs broker."
-license = "AGPL-3.0-only"
+# Pre-PEP-639 table form. The newer `license = "AGPL-3.0-only"` SPDX string
+# form makes hatchling emit `License-Expression:` under Metadata-Version 2.4,
+# which Cloudsmith's Python scanner does not yet recognise. The table form
+# emits the classic `License:` field which every scanner still reads.
+license = {text = "AGPL-3.0-only"}
 requires-python = ">=3.8"
 dependencies = [
   "protobuf>=7.0",

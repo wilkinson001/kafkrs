@@ -2,6 +2,11 @@ name: Release
 
 on:
   push:
+    # `branches:` here is a temporary trigger so the trial branch exercises
+    # the full publish path in CI. Remove it once we're happy and rely on
+    # the tag trigger + workflow_dispatch alone.
+    branches:
+      - cloudsmith-cargo-trial
     tags:
       - 'v*.*.*'
   workflow_dispatch: {}

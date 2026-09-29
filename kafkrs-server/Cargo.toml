@@ -27,7 +27,7 @@ tokio = { version = "1.37.0", features = [
   "time",
 ] }
 toml = "0.8.12"
-kafkrs-models = { path = "../kafkrs-models" }
+kafkrs-models = { path = "../kafkrs-models", version = "0.7.0", registry = "cloudsmith" }
 clap = { version = "4.5.4", features = ["derive"] }
 serde = { version = "1.0.198", features = ["derive"] }
 # Dev

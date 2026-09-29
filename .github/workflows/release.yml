@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    # `branches:` here is a temporary trigger so the trial branch exercises
+    # the full publish path in CI. Remove it once we're happy and rely on
+    # the tag trigger + workflow_dispatch alone.
+    branches:
+      - cloudsmith-cargo-trial
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-models:
+    name: Publish kafkrs-models to Cloudsmith
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo publish's verify step compiles in dev profile with no --profile
+      # flag exposed. Run a release-mode build first so the release path
+      # exercises the same profile consumers will build against, then use
+      # --no-verify on publish to skip the redundant debug rebuild.
+      - name: cargo build --release -p kafkrs-models
+        run: cargo build --release -p kafkrs-models
+      - name: cargo publish -p kafkrs-models --registry cloudsmith
+        env:
+          CARGO_REGISTRIES_CLOUDSMITH_TOKEN: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: cargo publish -p kafkrs-models --registry cloudsmith --no-verify
+
+  publish-server:
+    name: Publish kafkrs-server to Cloudsmith
+    needs: publish-models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo publish verifies kafkrs-server by resolving kafkrs-models from
+      # the Cloudsmith sparse index. Propagation is usually near-instant, but
+      # a small wait avoids a race on the first tag push.
+      - name: Wait for kafkrs-models to appear in Cloudsmith sparse index
+        run: sleep 60
+      - name: cargo build --release -p kafkrs-server
+        run: cargo build --release -p kafkrs-server
+      - name: cargo publish -p kafkrs-server --registry cloudsmith
+        env:
+          CARGO_REGISTRIES_CLOUDSMITH_TOKEN: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: cargo publish -p kafkrs-server --registry cloudsmith --no-verify
+
+  publish-python:
+    name: Publish kafkrs (Python) to Cloudsmith
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build cloudsmith-cli
+      - name: Build sdist + wheel
+        working-directory: kafkrs-python
+        run: python -m build
+      - name: Push artifacts to Cloudsmith
+        working-directory: kafkrs-python
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          set -euo pipefail
+          for artifact in dist/*; do
+            cloudsmith push python wtl/kafkrs "$artifact"
+          done

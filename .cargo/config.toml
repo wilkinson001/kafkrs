@@ -1,0 +1,6 @@
+[registries.cloudsmith]
+index = "sparse+https://cargo.cloudsmith.io/wtl/kafkrs/"
+# Cargo 1.74+ refuses to send credentials to an authenticated registry
+# unless a credential provider is declared. cargo:token is the built-in
+# provider that reads CARGO_REGISTRIES_CLOUDSMITH_TOKEN / credentials.toml.
+credential-provider = "cargo:token"
